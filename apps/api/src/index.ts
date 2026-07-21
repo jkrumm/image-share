@@ -61,13 +61,7 @@ export const app = new Elysia()
   })
   .use(
     cors({
-      origin: [
-        'https://images.jkrumm.com',
-        'https://share.jkrumm.com',
-        'https://images.test',
-        'https://share.test',
-        'http://localhost:7721',
-      ],
+      origin: ['https://share.jkrumm.com', 'https://share.test', 'http://localhost:7721'],
       // W3C trace-context headers must survive the browser→API hop so
       // distributed tracing links the two sides.
       allowedHeaders: ['Authorization', 'Content-Type', 'traceparent', 'tracestate', 'baggage'],
@@ -84,7 +78,7 @@ export const app = new Elysia()
           description:
             'Personal image service for Johannes Krumm: read-only library index, friend folder sharing (share.jkrumm.com), on-demand renditions, bearer-token ingest for agents, and publish-to-B2 (img.jkrumm.com). Start at GET /api for discovery. Everything under /api except discovery requires `Authorization: Bearer <API_SECRET>`; /s/* is the public share surface.',
         },
-        servers: [{ url: 'https://images.jkrumm.com', description: 'HomeLab (Cloudflare Tunnel)' }],
+        servers: [{ url: 'https://share.jkrumm.com', description: 'HomeLab (Cloudflare Tunnel)' }],
         components: {
           securitySchemes: { BearerAuth: { type: 'http', scheme: 'bearer' } },
         },

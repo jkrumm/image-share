@@ -30,9 +30,8 @@ image-share/
 └── apps/admin/                # @image-share/admin — Vite 8 + React 19 + basalt-ui SPA (argo dashboard clone)
 ```
 
-Hosts (both through the existing cloudflared wildcard → Caddy):
-- `share.jkrumm.com` — public share pages only. Caddy rewrites `/{slug}` → `/s/{slug}` (health passthrough at `/health`). Public URL shape: `share.jkrumm.com/mallorca-2026?token=…`.
-- `images.jkrumm.com` — admin SPA (static) + `/api/*` (bearer) + `/openapi`.
+Host (through the existing cloudflared wildcard → Caddy) — one public host, path-partitioned:
+- `share.jkrumm.com` — friend share slugs at the root (`share.jkrumm.com/mallorca-2026?token=…`; Caddy handles `/health`, `/api/*`, `/openapi*`, `/admin*`, `/s/*` before rewriting every other `/{slug}` → `/s/{slug}`), the admin SPA under `/admin` (static), `/api/*` (bearer), and `/openapi`.
 
 ## 2. Dependencies (scaffold installs ALL of these; feature agents never run `bun add`)
 
@@ -202,7 +201,7 @@ Errors: throw + bubble; guard throws `status(401)`; share routes catch-all → t
 - compose service `image-share`: `build: { context: /home/jkrumm/image-share/apps/api/../.. }` → actually
   `context: /home/jkrumm/image-share`, `dockerfile: apps/api/Dockerfile`; container_name `image-share`;
   networks `[cloudflared]`; mem limit 1G; healthcheck curl `/health` (port 7720); labels: glance
-  (`glance.name: Image Share`, `si:imgproxy`… pick a sensible simpleicon, `glance.url: https://images.jkrumm.com`),
+  (`glance.name: Image Share`, `si:imgproxy`… pick a sensible simpleicon, `glance.url: https://share.jkrumm.com/admin`),
   `com.centurylinklabs.watchtower.enable: 'false'` (local build).
   Volumes: `/home/jkrumm/ssd/SSD/Bilder:/photos/library:ro`, `/mnt/hdd/fuji/RAWs:/photos/raws:ro`,
   `/home/jkrumm/ssd/SSD/Bilder/Uploads:/photos/uploads`, `/home/jkrumm/ssd/SSD/Bilder/B2-Mirror:/photos/b2-mirror`,
@@ -211,25 +210,29 @@ Errors: throw + bubble; guard throws `status(401)`; share routes catch-all → t
   op://common/b2-images-write + op://common/backblaze-s3), `SHARE_BASE_URL=https://share.jkrumm.com`,
   `CDN_BASE=https://img.jkrumm.com`, `OTEL_EXPORTER_OTLP_ENDPOINT=` (empty until ClickStack exists on homelab —
   homelab agent verifies; if no clickstack container there, leave unset), `TZ=Europe/Berlin`.
-- Caddyfile: `images.jkrumm.com` public pattern → `reverse_proxy image-share:7720`;
-  `share.jkrumm.com` public pattern with `/health` passthrough + `rewrite * /s{uri}`.
+- Caddyfile: single `share.jkrumm.com` site block — plain `reverse_proxy image-share:7720`
+  handles for `/health`, `/api/*`, `/openapi*`, `/admin*`, `/s/*`, then a catch-all handle with
+  `rewrite * /s{uri}` + `reverse_proxy` for the friend share slugs.
 - `.env.tpl`: `IMAGE_SHARE_API_SECRET=op://homelab/image-share/API_SECRET` + B2 refs.
 - Makefile: `image-share-deploy` (pull ~/image-share + build --no-cache + up -d), `-restart`, `-logs`.
-- uptime-kuma monitors.yaml: Image Share subgroup — docker monitor + `https://images.jkrumm.com/health`
-  (cloudflare_bypass) + `https://share.jkrumm.com/health`.
+- uptime-kuma monitors.yaml: Image Share subgroup — docker monitor + `https://share.jkrumm.com/health`
+  (cloudflare_bypass).
 - restic: NO changes (Uploads/B2-Mirror land inside the Bilder source; live DB + renditions live
   outside all sources; snapshots land in the Dev source).
 - Dockerfile: `oven/bun:1.3` (Debian, NOT alpine — perl + glibc sharp prebuilds), two-stage:
   builder installs workspaces + `vite build` admin; runner: `apt-get install -y curl perl libjemalloc2`,
   `ENV LD_PRELOAD=/usr/lib/<arch>/libjemalloc.so.2` (arch-detect at build), non-root user with access to
   mounted volumes (match host uid 1000), `CMD bun run apps/api/src/index.ts`, HEALTHCHECK like argo.
-- DNS (deploy-time, /cloudflare skill): proxied CNAMEs `share` + `images` → `<TUNNEL_ID>.cfargotunnel.com`.
+- DNS (deploy-time, /cloudflare skill): proxied CNAME `share` → `<TUNNEL_ID>.cfargotunnel.com`.
 
 ## 12. Admin SPA (apps/admin — argo dashboard patterns exactly)
 
-basaltViteConfig (port 7721, apiTarget http://localhost:7720), main.tsx layer-css order, BasaltProvider
-dark, Eden treaty typed on `App` from `@image-share/api` alias, zustand persisted bearer + AuthGate,
-createBasaltQueryClient, TanStack Router file-based. Pages:
+basaltViteConfig (port 7721, apiTarget http://localhost:7720), Vite `base: '/admin/'` +
+TanStack Router `basepath: '/admin'` (the SPA is served under `/admin` — see §1), main.tsx layer-css
+order, BasaltProvider dark, Eden treaty typed on `App` from `@image-share/api` alias (baseUrl = bare
+`window.location.origin`, so `/api/*` resolves on the same host), zustand persisted bearer + AuthGate,
+createBasaltQueryClient, TanStack Router file-based. Pages (router paths, relative to the `/admin`
+basepath):
 - **Library** `/` — left dir tree (from /api/library/dirs), grid (SimpleGrid + AspectRatio + Image,
   thumb via access_token URL), rating filter (Rating component), sort, pagination; lightbox = Modal
   fullScreen with med rendition + prev/next/keyboard; selection mode → actions: "Publish to CDN…"

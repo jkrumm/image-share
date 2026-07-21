@@ -9,6 +9,6 @@ export const healthRoute = new Elysia().get('/health', () => ({ status: 'ok' as 
     tags: ['System'],
     summary: 'Liveness probe',
     description:
-      'Returns `{ status: "ok" }` if the API process is up. No auth required, does not touch the database. Served on both images.jkrumm.com and share.jkrumm.com (Caddy passthrough).',
+      'Returns `{ status: "ok" }` if the API process is up. No auth required, does not touch the database. Served at share.jkrumm.com/health (Caddy passthrough).',
   },
 })

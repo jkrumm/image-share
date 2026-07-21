@@ -22,6 +22,9 @@ const basalt = basaltViteConfig({
 
 export default defineConfig(
   mergeConfig(basalt, {
+    // The admin SPA is served under /admin (design §1) — emit /admin/-prefixed
+    // asset URLs so the built index.html loads from the right path.
+    base: '/admin/',
     plugins: [TanStackRouterVite({ target: 'react', autoCodeSplitting: true }), react()],
     resolve: {
       alias: {

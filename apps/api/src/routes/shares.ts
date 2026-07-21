@@ -12,13 +12,13 @@ import { env } from '../env.js'
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
 
 // Slugs that would collide with a reserved bare path on share.jkrumm.com. The
-// Caddy site block passes `/health` straight through to the container probe and
-// rewrites every other `/<slug>` → `/s/<slug>`; a share slugged "health" would
-// be permanently shadowed by the passthrough and serve the liveness JSON instead
-// of the gallery. Reject it at the admin boundary rather than mint a dead link.
-// 'health' and 's' are claimed by the Caddy site block on share.jkrumm.com
-// (healthcheck passthrough + unrewritten /s/* asset passthrough).
-const RESERVED_SLUGS = new Set(['health', 's'])
+// Caddy site block claims `/health`, `/s/*`, `/api/*`, `/admin*`, and `/openapi*`
+// with plain handles BEFORE the slug rewrite, then rewrites every other
+// `/<slug>` → `/s/<slug>`. A share slugged after any of those handles would be
+// permanently shadowed by the passthrough (serving the liveness JSON, the API,
+// the admin SPA, or the OpenAPI UI instead of the gallery). Reject them at the
+// admin boundary rather than mint a dead link.
+const RESERVED_SLUGS = new Set(['health', 's', 'api', 'admin', 'openapi'])
 
 // Shares can only target roots that hold JPEG-kind rows. RAWS_ROOT is a flat
 // `.RAF` tree (every row kind='raw'), and the share content query hard-requires
