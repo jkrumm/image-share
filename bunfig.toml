@@ -1,0 +1,10 @@
+# Repo-local Bun config. Merges with the global ~/.bunfig.toml (dotfiles) — a
+# local [install] section does NOT replace the global one, so the global 3-day
+# `minimumReleaseAge` cooldown still gates every third-party package.
+
+[install]
+# basalt-ui is first-party (published from ~/SourceRoot/basalt-ui with npm
+# provenance); the cooldown's threat model — hijacked maintainer accounts,
+# typosquats — doesn't apply, so a fresh release is consumed the same day.
+# Every other dependency keeps the full 3-day cooldown.
+minimumReleaseAgeExcludes = ["basalt-ui"]

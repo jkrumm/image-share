@@ -1,0 +1,289 @@
+import { afterAll, beforeAll, describe, expect, it, spyOn } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdir, rm, utimes, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { and, eq } from 'drizzle-orm'
+import sharp from 'sharp'
+import { exiftool } from 'exiftool-vendored'
+import { createDb, runMigrations, type Db } from '../db/index.js'
+import { b2Objects, images } from '../db/schema.js'
+import { endExiftool, parseFilenameDate } from './metadata.js'
+import * as metadataModule from './metadata.js'
+import { getIndexStatus, indexSinglePath, runScan, setScanDb, setScanRoots } from './scan.js'
+
+// Fully isolated from real photo trees and from every other test file's DB
+// (design §13): a fresh temp dir tree + an in-memory drizzle db, injected via
+// setScanDb/setScanRoots rather than mutating process.env. env.ts parses
+// process.env exactly once at import time — module-load ordering across a
+// multi-file `bun test` run isn't deterministic enough for env-var overrides
+// to reliably win, so scan.ts exposes these setters instead (mirrors
+// lib/share-auth.ts's setShareDb / lib/s3.ts's setS3).
+const testRoot = mkdtempSync(join(tmpdir(), 'image-share-indexer-'))
+const libraryRoot = join(testRoot, 'library')
+const rawsRoot = join(testRoot, 'raws')
+const uploadsDir = join(testRoot, 'uploads')
+
+let testDb: Db
+
+beforeAll(async () => {
+  const created = createDb(':memory:')
+  testDb = created.db
+  runMigrations(testDb)
+  setScanDb(testDb)
+  setScanRoots({
+    library: libraryRoot,
+    raws: rawsRoot,
+    uploads: uploadsDir,
+    excludeDirs: 'excluded-dir',
+  })
+
+  await mkdir(libraryRoot, { recursive: true })
+  await mkdir(rawsRoot, { recursive: true })
+  await mkdir(uploadsDir, { recursive: true })
+})
+
+afterAll(async () => {
+  setScanRoots(null)
+  await endExiftool()
+  rmSync(testRoot, { recursive: true, force: true })
+})
+
+// ── Fixture helpers ─────────────────────────────────────────────────────────
+
+async function writeJpegFixture(
+  absPath: string,
+  opts: { rating?: number; captureAt?: string; orientation?: number } = {},
+): Promise<void> {
+  await mkdir(dirname(absPath), { recursive: true })
+  await sharp({
+    create: { width: 60, height: 40, channels: 3, background: { r: 180, g: 90, b: 40 } },
+  })
+    .jpeg()
+    .withMetadata({ orientation: opts.orientation ?? 1 })
+    .toFile(absPath)
+
+  if (opts.rating !== undefined || opts.captureAt !== undefined) {
+    const tags: Record<string, unknown> = {}
+    if (opts.rating !== undefined) tags['Rating'] = opts.rating
+    if (opts.captureAt !== undefined) tags['DateTimeOriginal'] = opts.captureAt
+    await exiftool.write(absPath, tags, { writeArgs: ['-overwrite_original'] })
+  }
+}
+
+/** A RAF fixture is just bytes with a `.RAF` extension — exiftool tolerates
+ * unparseable content (returns generic file tags, no error), which is all the
+ * pairing + sidecar-rating tests need. */
+async function writeRafFixture(absPath: string): Promise<void> {
+  await mkdir(dirname(absPath), { recursive: true })
+  await writeFile(absPath, `not a real raf: ${absPath}`)
+}
+
+async function writeXmpSidecar(absPath: string, rating: number): Promise<void> {
+  await mkdir(dirname(absPath), { recursive: true })
+  await exiftool.write(absPath, { Rating: rating }, { writeArgs: ['-overwrite_original'] })
+}
+
+async function rowFor(root: string, relPath: string) {
+  const rows = await testDb
+    .select()
+    .from(images)
+    .where(and(eq(images.root, root), eq(images.relPath, relPath)))
+  return rows[0] ?? null
+}
+
+describe('indexer scan', () => {
+  it('indexes a tree: JPEG (rated, dated) + paired RAF + excluded dir + uploads', async () => {
+    await writeJpegFixture(join(libraryRoot, 'mallorca-2026/DSCF0001.JPG'), {
+      rating: 4,
+      captureAt: '2026:03:15 10:20:30',
+      orientation: 6,
+    })
+    await writeRafFixture(join(rawsRoot, 'DSCF0001.RAF'))
+    // Excluded top-level dir under LIBRARY_ROOT (design §3) — must never be scanned.
+    await writeJpegFixture(join(libraryRoot, 'excluded-dir/skip.jpg'))
+    await writeJpegFixture(join(uploadsDir, '2026/07/upload.jpg'))
+
+    const counts = await runScan()
+
+    expect(counts.added).toBe(3) // library jpeg + raf + upload — excluded dir is not scanned
+    expect(counts.updated).toBe(0)
+    expect(counts.removed).toBe(0)
+    expect(counts.scanned).toBe(3)
+
+    const jpegRow = await rowFor('library', 'mallorca-2026/DSCF0001.JPG')
+    expect(jpegRow).not.toBeNull()
+    expect(jpegRow?.dir).toBe('mallorca-2026')
+    expect(jpegRow?.stem).toBe('DSCF0001')
+    expect(jpegRow?.ext).toBe('jpg')
+    expect(jpegRow?.kind).toBe('jpeg')
+    expect(jpegRow?.rating).toBe(4)
+    expect(jpegRow?.orientation).toBe(6)
+    expect(jpegRow?.width).toBe(60)
+    expect(jpegRow?.height).toBe(40)
+    // exifr treats the naive EXIF datetime as local wall-clock time, so the
+    // expected ISO string is computed the same way (TZ-agnostic assertion).
+    expect(jpegRow?.captureAt).toBe(new Date(2026, 2, 15, 10, 20, 30).toISOString())
+    // RAW pairing (design §5): library jpeg stem matches a raws row stem.
+    expect(jpegRow?.rawPath).toBe('DSCF0001.RAF')
+
+    const rawRow = await rowFor('raws', 'DSCF0001.RAF')
+    expect(rawRow).not.toBeNull()
+    expect(rawRow?.kind).toBe('raw')
+    expect(rawRow?.ext).toBe('raf')
+
+    const excludedRow = await rowFor('library', 'excluded-dir/skip.jpg')
+    expect(excludedRow).toBeNull()
+
+    const uploadRow = await rowFor('uploads', '2026/07/upload.jpg')
+    expect(uploadRow).not.toBeNull()
+
+    const finalStatus = getIndexStatus()
+    expect(finalStatus.running).toBe(false)
+    expect(finalStatus.lastError).toBeNull()
+    expect(finalStatus.lastCounts).toEqual(counts)
+  })
+
+  it('re-indexing unchanged files does not re-read metadata', async () => {
+    const spy = spyOn(metadataModule, 'extractMetadata')
+    spy.mockClear()
+
+    const counts = await runScan()
+
+    expect(counts.added).toBe(0)
+    expect(counts.updated).toBe(0)
+    expect(counts.removed).toBe(0)
+    expect(spy).toHaveBeenCalledTimes(0)
+
+    spy.mockRestore()
+  })
+
+  it('a newer sidecar triggers a rating update via a targeted rescan', async () => {
+    const sidecarPath = join(rawsRoot, 'DSCF0002.xmp')
+    await writeRafFixture(join(rawsRoot, 'DSCF0002.RAF'))
+    await writeXmpSidecar(sidecarPath, 2)
+
+    let counts = await runScan()
+    expect(counts.added).toBe(1)
+
+    let row = await rowFor('raws', 'DSCF0002.RAF')
+    expect(row?.rating).toBe(2)
+    const firstIndexedAtMs = new Date(row?.indexedAt as string).getTime()
+
+    // Mutate the sidecar rating and force its mtime strictly after the
+    // previous indexedAt so the "newer sidecar" staleness check (design §5)
+    // fires regardless of filesystem mtime resolution.
+    await writeXmpSidecar(sidecarPath, 5)
+    const future = new Date(firstIndexedAtMs + 5000)
+    await utimes(sidecarPath, future, future)
+
+    counts = await runScan()
+    expect(counts.updated).toBe(1)
+    expect(counts.added).toBe(0)
+
+    row = await rowFor('raws', 'DSCF0002.RAF')
+    expect(row?.rating).toBe(5)
+  })
+
+  it('recognizes the X.RAF.xmp sidecar naming convention too', async () => {
+    await writeRafFixture(join(rawsRoot, 'DSCF0003.RAF'))
+    await writeXmpSidecar(join(rawsRoot, 'DSCF0003.RAF.xmp'), 3)
+
+    await runScan()
+
+    const row = await rowFor('raws', 'DSCF0003.RAF')
+    expect(row?.rating).toBe(3)
+  })
+
+  it('removes rows for vanished files and clears stale RAW pairing', async () => {
+    // DSCF0001.RAF pairs with the library jpeg indexed in the first test.
+    await rm(join(rawsRoot, 'DSCF0001.RAF'))
+
+    const counts = await runScan()
+    expect(counts.removed).toBe(1)
+
+    const rawRow = await rowFor('raws', 'DSCF0001.RAF')
+    expect(rawRow).toBeNull()
+
+    const jpegRow = await rowFor('library', 'mallorca-2026/DSCF0001.JPG')
+    expect(jpegRow?.rawPath).toBeNull()
+  })
+
+  it('prunes a vanished published image without aborting the scan (FK detach)', async () => {
+    // Publish an image: index it, then reference it from b2_objects like
+    // POST /api/publish does. b2_objects.published_image_id is an FK to images.id
+    // with ON DELETE NO ACTION and foreign_keys=ON — deleting the still-referenced
+    // image would throw 'FOREIGN KEY constraint failed' and abort the whole scan.
+    const rel = 'published/DSCF9000.JPG'
+    const abs = join(libraryRoot, rel)
+    await writeJpegFixture(abs)
+    await runScan()
+    const published = await rowFor('library', rel)
+    expect(published).not.toBeNull()
+
+    await testDb.insert(b2Objects).values({
+      key: 'img/fuji/DSCF9000.jpg',
+      size: 123,
+      lastModified: '2026-07-01T00:00:00.000Z',
+      publishedImageId: published!.id,
+      firstSeenAt: '2026-07-01T00:00:00.000Z',
+    })
+
+    // The file is moved/renamed while organizing photos → its rel_path vanishes.
+    await rm(abs)
+
+    // Must NOT throw, must prune the image, and must complete (lastError null).
+    const counts = await runScan()
+    expect(counts.removed).toBeGreaterThanOrEqual(1)
+    expect(getIndexStatus().lastError).toBeNull()
+    expect(await rowFor('library', rel)).toBeNull()
+
+    // The mirror row survives as an out-of-band object with the link nulled.
+    const b2Row = await testDb
+      .select()
+      .from(b2Objects)
+      .where(eq(b2Objects.key, 'img/fuji/DSCF9000.jpg'))
+    expect(b2Row[0]).toBeDefined()
+    expect(b2Row[0]?.publishedImageId).toBeNull()
+  })
+
+  it('falls back to the filename date pattern when no EXIF/XMP capture date exists', async () => {
+    const name = '2025-11-02_08-15-00_hike.jpg'
+    await writeJpegFixture(join(libraryRoot, name)) // no captureAt/rating
+
+    await runScan()
+
+    const row = await rowFor('library', name)
+    expect(row?.captureAt).toBe(parseFilenameDate(name))
+  })
+})
+
+describe('indexSinglePath', () => {
+  it('indexes an uploaded file and returns its id; re-indexing upserts the same row', async () => {
+    const relPath = '2026/07/ingested.jpg'
+    await writeJpegFixture(join(uploadsDir, relPath), { rating: 5 })
+
+    const id = await indexSinglePath({ root: 'uploads', relPath })
+    expect(typeof id).toBe('number')
+
+    let row = await rowFor('uploads', relPath)
+    expect(row?.id).toBe(id)
+    expect(row?.rating).toBe(5)
+    expect(row?.dir).toBe('2026/07')
+
+    // Re-uploading the same relPath (e.g. a re-ingest) upserts rather than
+    // duplicating the (root, rel_path) unique row.
+    await writeJpegFixture(join(uploadsDir, relPath), { rating: 1 })
+    const secondId = await indexSinglePath({ root: 'uploads', relPath })
+    expect(secondId).toBe(id)
+
+    row = await rowFor('uploads', relPath)
+    expect(row?.rating).toBe(1)
+  })
+
+  it('rejects a relPath that escapes UPLOADS_DIR', async () => {
+    await expect(
+      indexSinglePath({ root: 'uploads', relPath: '../../etc/passwd' }),
+    ).rejects.toThrow()
+  })
+})

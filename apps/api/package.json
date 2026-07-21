@@ -1,0 +1,39 @@
+{
+  "name": "@image-share/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun run --hot src/index.ts",
+    "test": "bun test --isolate",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate"
+  },
+  "dependencies": {
+    "@elysiajs/cors": "^1",
+    "@elysiajs/openapi": "^1",
+    "@elysiajs/opentelemetry": "^1.4.11",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/api-logs": "^0.217.0",
+    "@opentelemetry/exporter-logs-otlp-proto": "^0.217.0",
+    "@opentelemetry/exporter-trace-otlp-proto": "^0.217.0",
+    "@opentelemetry/resources": "^2.0.0",
+    "@opentelemetry/sdk-logs": "^0.217.0",
+    "@opentelemetry/sdk-trace-base": "^2.7.1",
+    "client-zip": "2.5.0",
+    "croner": "9.1.0",
+    "drizzle-orm": "0.45.2",
+    "elysia": "^1.4.26",
+    "exifr": "7.1.3",
+    "exiftool-vendored": "37.0.0",
+    "sharp": "0.35.3",
+    "zod": "^4"
+  },
+  "devDependencies": {
+    "bun-types": "^1",
+    "drizzle-kit": "0.31.10",
+    "typescript": "^5"
+  }
+}

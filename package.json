@@ -1,0 +1,25 @@
+{
+  "name": "image-share",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "./scripts/dev.sh",
+    "test": "bun test --cwd apps/api --isolate",
+    "typecheck": "tsc --noEmit -p apps/api && bun run --cwd apps/admin typecheck",
+    "lint": "oxlint .",
+    "lint:fix": "oxlint --fix .",
+    "format": "oxfmt 'apps/**' '!**/dist/**' '!**/drizzle/**' --write",
+    "format:check": "oxfmt 'apps/**' '!**/dist/**' '!**/drizzle/**' --check",
+    "check": "bun run lint && bun run format:check && bun run typecheck && bun run test",
+    "db:generate": "bun run --cwd apps/api db:generate"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "lefthook": "^2.1.6",
+    "oxfmt": "^0.45.0",
+    "oxlint": "^1.60.0",
+    "typescript": "^5.9.3"
+  }
+}

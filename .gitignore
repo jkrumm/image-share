@@ -1,0 +1,18 @@
+.idea
+.DS_Store
+.env
+.env.local
+node_modules/
+
+# Local dev data roots + runtime state (see scripts/dev.sh, .env.local.tpl)
+.dev/
+
+# Build output
+dist/
+
+# SQLite database, WAL/SHM sidecars, and snapshots (rebuildable cache;
+# drizzle/ migrations are committed and NOT ignored)
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
