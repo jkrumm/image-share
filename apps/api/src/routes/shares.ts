@@ -16,7 +16,9 @@ const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
 // rewrites every other `/<slug>` → `/s/<slug>`; a share slugged "health" would
 // be permanently shadowed by the passthrough and serve the liveness JSON instead
 // of the gallery. Reject it at the admin boundary rather than mint a dead link.
-const RESERVED_SLUGS = new Set(['health'])
+// 'health' and 's' are claimed by the Caddy site block on share.jkrumm.com
+// (healthcheck passthrough + unrewritten /s/* asset passthrough).
+const RESERVED_SLUGS = new Set(['health', 's'])
 
 // Shares can only target roots that hold JPEG-kind rows. RAWS_ROOT is a flat
 // `.RAF` tree (every row kind='raw'), and the share content query hard-requires

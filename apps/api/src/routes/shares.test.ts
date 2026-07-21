@@ -332,8 +332,10 @@ describe('shares input validation (boundary rejects)', () => {
     expect(res.status).toBe(422)
   })
 
-  it('rejects a reserved slug that would collide with the /health passthrough', async () => {
-    const res = await post({ ...base, slug: 'health' })
-    expect(res.status).toBe(400)
+  it('rejects reserved slugs that would collide with the Caddy passthroughs', async () => {
+    for (const slug of ['health', 's']) {
+      const res = await post({ ...base, slug })
+      expect(res.status).toBe(400)
+    }
   })
 })
