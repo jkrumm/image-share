@@ -184,8 +184,11 @@ for numeric params, `z.enum` never literal-unions, ISO date strings, `detail` wi
 - `GET /api/library/images/:id/file?size=thumb|med|full|orig` — bytes. Accepts bearer header OR
   `?access_token=<API_SECRET>` (browser `<img>` tags; this route only).
 - `POST /api/index/rescan` → 202 `{ started }` · `GET /api/index/status`
-- Shares (role-based rework, stage 1): `GET /api/shares` (each with tokens `{id, role, label, url,
-  createdAt, revokedAt}` + `imageCount` + minted URLs `SHARE_BASE_URL/<slug>?token=…`) ·
+- Shares (role-based rework, stage 1; admin-UX rework, stage 2): `GET /api/shares` (each with tokens
+  `{id, role, label, url, createdAt, revokedAt}` + `imageCount` + minted URLs
+  `SHARE_BASE_URL/<slug>?token=…`) · `GET /api/shares/:id` → the same shape plus `images: ImageDto[]`
+  (folder: live-filtered, capture_at ascending; selection: `share_images` in position order) — powers
+  the admin share detail page ·
   `POST /api/shares { slug?, title, note?, expiresAt?, source: {type:'folder', root, dir, minRating?} |
   {type:'selection', imageIds} }` — `slug` auto-derives from `title` (lowercased, non-alphanumerics →
   `-`, collapsed/trimmed, `-2`/`-3`… on collision) when omitted; mints one initial token, role=`view` ·
@@ -265,10 +268,21 @@ basepath):
 - **Library** `/` — left dir tree (from /api/library/dirs), grid (SimpleGrid + AspectRatio + Image,
   thumb via access_token URL), rating filter (Rating component), sort, pagination; lightbox = Modal
   fullScreen with med rendition + prev/next/keyboard; selection mode → actions: "Publish to CDN…"
-  (prefix picker modal → notifyPromise), "Create share from this folder…" (prefills share form).
-- **Shares** `/shares` — BasaltDataTable of shares (slug, folder, filter, size, raws, expiry, tokens);
-  create/edit modal (useBasaltForm + zod); per-share: copy URL, roll token (confirm modal), add token,
-  delete (DangerZone-style confirm); show minted URLs with CopyButton.
+  (prefix picker modal → notifyPromise), "Create share" (selection share, capture-display order, via
+  `CreateShareModal`); folder toolbar → "Share whole folder" (folder share carrying the active
+  minRating, via the same modal) — hidden for `root='raws'`.
+- **Shares** `/shares` — admin-UX rework, stage 2: a pure navigation table (title, slug, source,
+  image count, active-token count, created) whose rows link to the detail route; "New share" opens
+  `CreateShareModal` in its root/dir-picker mode (the only entry point without ambient folder/selection
+  context). `create-share-modal.tsx` asks only for title (autofocus, server-derived slug previewed
+  client-side) + an optional markdown note — never re-asks for a folder/selection the caller already
+  resolved.
+- **Shares detail** `/shares/:id` — header (inline-editable title, slug, source line), Links section
+  (per-token role badge/label/URL/CopyButton/created date, revoke-with-confirm, a "show revoked" toggle,
+  "Add link" via the adapted `add-token-modal.tsx`, "Roll all links" replacing every active token),
+  Images section (thumbnail grid; selection shares get a per-tile remove action patching `imageIds`,
+  folder shares are read-only), a collapsed Settings section (note/expiry/minRating via PATCH), and a
+  DangerZone delete action navigating back to `/shares`.
 - **Activity** `/activity` — StatCards from /api/stats, index status + "Rescan now", b2 objects table
   (mirrored badge), buttons for reconcile/reverse-backup (notifyPromise).
 - **Uploads** — FileButton multi-upload to POST /api/images with progress notifications.

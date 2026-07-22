@@ -1,6 +1,7 @@
-import { queryOptions, useMutation, useQueryClient } from '@tanstack/react-query'
+import { queryOptions, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { unwrap } from 'basalt-ui/query'
 import { client } from '../eden'
+import type { ImageDto } from './library'
 
 export type TokenRole = 'view' | 'download' | 'full'
 
@@ -33,6 +34,8 @@ export type ShareDto = {
   tokens: TokenDto[]
 }
 
+export type ShareDetailDto = ShareDto & { images: ImageDto[] }
+
 export type ShareSourceInput =
   | { type: 'folder'; root: ShareRoot; dir: string; minRating?: number | null }
   | { type: 'selection'; imageIds: number[] }
@@ -61,6 +64,16 @@ export const sharesQueries = {
       queryKey: [...sharesQueries.all(), 'list'] as const,
       queryFn: () => unwrap(client.api.shares.get()),
     }),
+  detail: (id: number) =>
+    queryOptions({
+      queryKey: [...sharesQueries.all(), 'detail', id] as const,
+      queryFn: () => unwrap(client.api.shares({ id: String(id) }).get()) as Promise<ShareDetailDto>,
+    }),
+}
+
+/** Share detail page data — thin wrapper over sharesQueries.detail(id). */
+export function useShare(id: number) {
+  return useQuery(sharesQueries.detail(id))
 }
 
 function invalidateShares(qc: ReturnType<typeof useQueryClient>) {

@@ -5,7 +5,8 @@ import { and, desc, eq, isNull } from 'drizzle-orm'
 import { db } from '../db/index.js'
 import { shares, shareTokens, type ShareRow, type ShareTokenRow } from '../db/schema.js'
 import { env } from '../env.js'
-import { shareImageCount, setShareImages } from '../lib/share-auth.js'
+import { listShareImages, shareImageCount, setShareImages } from '../lib/share-auth.js'
+import { ImageDto, toImageDto } from './library.js'
 
 // Share management (design §8, role-based rework). A share is either a
 // `folder` (root+dir, live-filtered from the index) or a `selection`
@@ -143,6 +144,10 @@ async function toShareDto(
   }
 }
 
+// Detail view (GET /api/shares/:id) — the list DTO plus the share's resolved
+// image set, powering the admin detail page's thumbnail grid (design §12).
+const ShareDetailDto = ShareDto.extend({ images: z.array(ImageDto) })
+
 const FolderSource = z.object({
   type: z.literal('folder'),
   root: ShareRootEnum,
@@ -204,6 +209,29 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
         summary: 'List shares with tokens, image counts, and minted URLs',
         description:
           'Returns every share (folder or selection) with its (active + revoked) tokens, each token’s role, and the minted SHARE_BASE_URL/<slug>?token=… links.',
+        security: [{ BearerAuth: [] }],
+      },
+    },
+  )
+  .get(
+    '/api/shares/:id',
+    async ({ params, status }) => {
+      const [share] = await db.select().from(shares).where(eq(shares.id, params.id)).limit(1)
+      if (!share) return status(404, 'Share not found')
+
+      const tokens = await db.select().from(shareTokens).where(eq(shareTokens.shareId, params.id))
+      const imageRows = await listShareImages(share)
+      const dto = await toShareDto(share, tokens)
+      return { ...dto, images: imageRows.map(toImageDto) }
+    },
+    {
+      params: z.object({ id: z.coerce.number().int() }),
+      response: { 200: ShareDetailDto, 404: z.string() },
+      detail: {
+        tags: ['Shares'],
+        summary: 'Get a single share with tokens and its resolved image set',
+        description:
+          'Same shape as the list endpoint plus `images`: a folder share’s live-filtered, capture_at-ascending image list, or a selection share’s share_images in position order. Powers the admin share detail page.',
         security: [{ BearerAuth: [] }],
       },
     },

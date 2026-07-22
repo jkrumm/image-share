@@ -23,9 +23,23 @@ import { EmptyState, PageActions } from 'basalt-ui'
 import { DirTree } from '../features/library/dir-tree'
 import { Lightbox } from '../features/library/lightbox'
 import { PublishModal } from '../features/library/publish-modal'
-import { ShareFormModal } from '../features/shares/share-form-modal'
+import {
+  CreateShareModal,
+  type CreateShareModalSource,
+} from '../features/shares/create-share-modal'
 import { imageFileUrl } from '../lib/eden'
 import { libraryQueries, type ImageDto, type LibraryRoot } from '../lib/queries/library'
+
+/** Selected ids in display (capture) order, not click order — images present
+ * on the current page are ordered as rendered; ids selected on another page
+ * (no longer in `images`) fall back to Set-iteration order since their
+ * capture position isn't known client-side. */
+function orderedSelectionIds(images: ImageDto[], selection: Set<number>): number[] {
+  const onPage = images.filter((image) => selection.has(image.id)).map((image) => image.id)
+  const onPageSet = new Set(onPage)
+  const rest = Array.from(selection).filter((id) => !onPageSet.has(id))
+  return [...onPage, ...rest]
+}
 
 const LIMIT = 60
 
@@ -52,7 +66,7 @@ function LibraryPage() {
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
   const [selection, setSelection] = useState<Set<number>>(new Set())
   const [publishOpened, setPublishOpened] = useState(false)
-  const [shareFromFolderOpened, setShareFromFolderOpened] = useState(false)
+  const [createShareSource, setCreateShareSource] = useState<CreateShareModalSource | null>(null)
 
   const imagesParams = useMemo(
     () => ({
@@ -92,6 +106,15 @@ function LibraryPage() {
   }
 
   const selectedIds = Array.from(selection)
+
+  // RAWs can't back a folder share — every raws row is kind='raw' and the
+  // share content query requires kind='jpeg', so the link would be dead on
+  // arrival. RAW downloads ride along on a fuji/share folder share via a
+  // full-role token instead.
+  const shareableFolder =
+    search.root !== undefined && search.root !== 'raws' && search.dir !== undefined
+      ? { root: search.root, dir: search.dir }
+      : null
 
   return (
     <Grid gap={0} h="calc(100vh - 60px)">
@@ -145,19 +168,37 @@ function LibraryPage() {
                   <Button size="xs" onClick={() => setPublishOpened(true)}>
                     Publish to CDN…
                   </Button>
+                  <Button
+                    size="xs"
+                    onClick={() =>
+                      setCreateShareSource({
+                        type: 'selection',
+                        imageIds: orderedSelectionIds(images, selection),
+                      })
+                    }
+                  >
+                    Create share
+                  </Button>
                 </Group>
               </Group>
             </Paper>
           )}
 
-          {/* RAWs can't back a folder share — every raws row is kind='raw' and the
-              share content query requires kind='jpeg', so the link would be dead
-              on arrival. RAW downloads ride along on a fuji/share folder share
-              via a full-role token instead. */}
-          {search.dir !== undefined && search.root !== 'raws' && (
+          {shareableFolder && (
             <Group justify="flex-end">
-              <Button size="xs" variant="light" onClick={() => setShareFromFolderOpened(true)}>
-                Create share from this folder…
+              <Button
+                size="xs"
+                variant="light"
+                onClick={() =>
+                  setCreateShareSource({
+                    type: 'folder',
+                    root: shareableFolder.root,
+                    dir: shareableFolder.dir,
+                    minRating: search.minRating ?? null,
+                  })
+                }
+              >
+                Share whole folder
               </Button>
             </Group>
           )}
@@ -221,13 +262,12 @@ function LibraryPage() {
         opened={publishOpened}
         onClose={() => setPublishOpened(false)}
       />
-      {search.root && search.root !== 'raws' && search.dir !== undefined && (
-        <ShareFormModal
-          opened={shareFromFolderOpened}
-          onClose={() => setShareFromFolderOpened(false)}
-          initial={{ root: search.root, dir: search.dir }}
-        />
-      )}
+      <CreateShareModal
+        opened={createShareSource !== null}
+        onClose={() => setCreateShareSource(null)}
+        source={createShareSource ?? undefined}
+        onCreated={() => setSelection(new Set())}
+      />
     </Grid>
   )
 }

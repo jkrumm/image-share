@@ -29,7 +29,7 @@ function contentTypeForExt(ext: string): string {
 
 // ── Shared DTO ───────────────────────────────────────────────────────────────
 
-const ImageDto = z.object({
+export const ImageDto = z.object({
   id: z.number().int(),
   root: z.enum(['fuji', 'raws', 'share']),
   relPath: z.string(),
@@ -48,7 +48,7 @@ const ImageDto = z.object({
   indexedAt: z.string(),
 })
 
-function toImageDto(row: ImageRow): z.infer<typeof ImageDto> {
+export function toImageDto(row: ImageRow): z.infer<typeof ImageDto> {
   return {
     id: row.id,
     root: row.root as z.infer<typeof ImageDto>['root'],

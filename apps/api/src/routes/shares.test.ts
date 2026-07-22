@@ -37,14 +37,14 @@ function buildApp() {
 
 // share_images.image_id is a real FK to images.id (foreign_keys=ON) — a
 // selection share's imageIds must reference actual rows.
-async function seedImage(relPath: string): Promise<number> {
+async function seedImage(relPath: string, dir = ''): Promise<number> {
   const now = new Date().toISOString()
   const [row] = await testDb
     .insert(schema.images)
     .values({
       root: 'fuji',
       relPath,
-      dir: '',
+      dir,
       stem: relPath.replace(/\.jpg$/, ''),
       ext: 'jpg',
       kind: 'jpeg',
@@ -181,6 +181,46 @@ describe('shares input validation (boundary rejects)', () => {
       const res = await post({ slug, title: 'reserved test', source: folderSource })
       expect(res.status).toBe(400)
     }
+  })
+})
+
+describe('GET /api/shares/:id', () => {
+  it('404s for an unknown id', async () => {
+    const app = buildApp()
+    const res = await app.handle(new Request('http://localhost/api/shares/999999'))
+    expect(res.status).toBe(404)
+  })
+
+  it('returns a folder share with its live-filtered images', async () => {
+    await seedImage('detail-folder-a.jpg', 'detail-x')
+    await seedImage('detail-folder-b.jpg', 'detail-x')
+    const created = (await (
+      await post({
+        title: 'detail-folder',
+        source: { type: 'folder', root: 'fuji', dir: 'detail-x' },
+      })
+    ).json()) as ShareDto
+
+    const app = buildApp()
+    const res = await app.handle(new Request(`http://localhost/api/shares/${created.id}`))
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as ShareDto & { images: { id: number }[] }
+    expect(body.id).toBe(created.id)
+    expect(body.images).toHaveLength(2)
+  })
+
+  it('returns a selection share with images in position order', async () => {
+    const a = await seedImage('detail-sel-a.jpg')
+    const b = await seedImage('detail-sel-b.jpg')
+    const created = (await (
+      await post({ title: 'detail-selection', source: { type: 'selection', imageIds: [b, a] } })
+    ).json()) as ShareDto
+
+    const app = buildApp()
+    const res = await app.handle(new Request(`http://localhost/api/shares/${created.id}`))
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as ShareDto & { images: { id: number }[] }
+    expect(body.images.map((i) => i.id)).toEqual([b, a])
   })
 })
 
