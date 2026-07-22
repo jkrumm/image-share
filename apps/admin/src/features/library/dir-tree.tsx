@@ -9,9 +9,9 @@ type Props = {
 }
 
 const ROOT_LABEL: Record<LibraryRoot, string> = {
-  library: 'Library',
+  fuji: 'Fuji',
   raws: 'RAWs',
-  uploads: 'Uploads',
+  share: 'Share',
 }
 
 function groupByRoot(dirs: DirDto[]): Map<LibraryRoot, DirDto[]> {
@@ -42,7 +42,7 @@ export function DirTree({ root, dir, onSelect }: Props) {
   return (
     <ScrollArea.Autosize mah="calc(100vh - 140px)">
       <Stack gap="md" p="sm">
-        {(['library', 'uploads', 'raws'] as const).map((r) => {
+        {(['fuji', 'share', 'raws'] as const).map((r) => {
           const items = groups.get(r) ?? []
           if (items.length === 0) return null
           return (

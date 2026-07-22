@@ -26,7 +26,7 @@ interface StatsDto {
   images: number
   jpegs: number
   raws: number
-  uploads: number
+  share: number
   shares: number
   activeTokens: number
   b2Objects: number
@@ -42,7 +42,7 @@ describe('GET /api/stats', () => {
     const now = new Date().toISOString()
     await testDb.insert(schema.images).values([
       {
-        root: 'library',
+        root: 'fuji',
         relPath: 'a.jpg',
         dir: '',
         stem: 'a',
@@ -64,7 +64,7 @@ describe('GET /api/stats', () => {
         indexedAt: now,
       },
       {
-        root: 'uploads',
+        root: 'share',
         relPath: '2026/01/b.jpg',
         dir: '2026/01',
         stem: 'b',
@@ -75,10 +75,17 @@ describe('GET /api/stats', () => {
         indexedAt: now,
       },
     ])
+    await testDb.insert(schema.shares).values({
+      slug: 's1',
+      title: 'S1',
+      sourceType: 'folder',
+      root: 'fuji',
+      dir: '',
+      createdAt: now,
+    })
     await testDb
-      .insert(schema.shares)
-      .values({ slug: 's1', root: 'library', dir: '', sizeLimit: 'medium', createdAt: now })
-    await testDb.insert(schema.shareTokens).values({ shareId: 1, token: 't1', createdAt: now })
+      .insert(schema.shareTokens)
+      .values({ shareId: 1, token: 't1', role: 'view', createdAt: now })
     await testDb.insert(schema.b2Objects).values([
       { key: 'img/a.jpg', size: 1, lastModified: now, mirroredAt: now, firstSeenAt: now },
       { key: 'img/b.jpg', size: 1, lastModified: now, mirroredAt: null, firstSeenAt: now },
@@ -92,7 +99,7 @@ describe('GET /api/stats', () => {
     expect(body.images).toBe(3)
     expect(body.jpegs).toBe(2)
     expect(body.raws).toBe(1)
-    expect(body.uploads).toBe(1)
+    expect(body.share).toBe(1)
     expect(body.shares).toBe(1)
     expect(body.activeTokens).toBe(1)
     expect(body.b2Objects).toBe(2)

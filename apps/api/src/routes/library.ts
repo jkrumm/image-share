@@ -4,7 +4,7 @@ import { and, asc, count, desc, eq, gte, like, or, sql } from 'drizzle-orm'
 import { db } from '../db/index.js'
 import { images, type ImageRow } from '../db/schema.js'
 import { env } from '../env.js'
-import { safeJoin } from '../lib/paths.js'
+import { rootBaseDir, safeJoin } from '../lib/paths.js'
 import { renderRendition } from '../renditions/render.js'
 
 // Library reads (design §8). `libraryRoutes` mounts INSIDE the bearer-guarded
@@ -12,12 +12,6 @@ import { renderRendition } from '../renditions/render.js'
 // `<img>` tags can't send an Authorization header — it accepts the bearer OR
 // `?access_token=<API_SECRET>` and does its own check (mirrors argo's
 // audioFileRoutes precedent).
-
-const ROOT_PATH = {
-  library: env.LIBRARY_ROOT,
-  raws: env.RAWS_ROOT,
-  uploads: env.UPLOADS_DIR,
-} as const
 
 const CONTENT_TYPE_BY_EXT: Record<string, string> = {
   jpg: 'image/jpeg',
@@ -37,7 +31,7 @@ function contentTypeForExt(ext: string): string {
 
 const ImageDto = z.object({
   id: z.number().int(),
-  root: z.enum(['library', 'raws', 'uploads']),
+  root: z.enum(['fuji', 'raws', 'share']),
   relPath: z.string(),
   dir: z.string(),
   stem: z.string(),
@@ -76,7 +70,7 @@ function toImageDto(row: ImageRow): z.infer<typeof ImageDto> {
 }
 
 const DirDto = z.object({
-  root: z.enum(['library', 'raws', 'uploads']),
+  root: z.enum(['fuji', 'raws', 'share']),
   dir: z.string(),
   imageCount: z.number().int(),
   ratedCounts: z
@@ -169,7 +163,7 @@ export const libraryRoutes = new Elysia({ name: 'library' })
     },
     {
       query: z.object({
-        root: z.enum(['library', 'raws', 'uploads']).optional(),
+        root: z.enum(['fuji', 'raws', 'share']).optional(),
         dir: z.string().optional(),
         recursive: z.coerce.boolean().default(false).optional(),
         minRating: z.coerce.number().int().min(0).max(5).optional(),
@@ -201,8 +195,7 @@ export const libraryFileRoutes = new Elysia({ name: 'library-file' }).get(
     const [row] = await db.select().from(images).where(eq(images.id, params.id)).limit(1)
     if (!row) return status(404, 'Image not found')
 
-    const rootPath = ROOT_PATH[row.root as keyof typeof ROOT_PATH]
-    const absPath = safeJoin(rootPath, row.relPath)
+    const absPath = safeJoin(rootBaseDir(row.root), row.relPath)
 
     set.headers['cache-control'] = 'private, max-age=31536000, immutable'
 

@@ -37,7 +37,7 @@ afterEach(async () => {
 describe('renditionCacheKey', () => {
   it('is deterministic for identical identity parts', () => {
     const parts = {
-      root: 'library',
+      root: 'fuji',
       relPath: 'a/b.jpg',
       mtimeMs: 123,
       fileSize: 456,
@@ -48,7 +48,7 @@ describe('renditionCacheKey', () => {
 
   it('changes when any identity part changes', () => {
     const base = {
-      root: 'library',
+      root: 'fuji',
       relPath: 'a/b.jpg',
       mtimeMs: 123,
       fileSize: 456,

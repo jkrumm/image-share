@@ -25,7 +25,7 @@ mock.module('../db/index.js', () => ({
 const { libraryRoutes, libraryFileRoutes } = await import('./library.js')
 const { authGuard } = await import('../lib/auth-guard.js')
 
-const fixtureDir = join(env.UPLOADS_DIR, 'library-test-fixtures')
+const fixtureDir = join(env.SHARE_ROOT, 'library-test-fixtures')
 
 afterAll(() => {
   rmSync(fixtureDir, { recursive: true, force: true })
@@ -68,11 +68,11 @@ describe('GET /api/library/images/:id/file', () => {
   it('accepts ?access_token=<API_SECRET> (the only route allowed to)', async () => {
     const now = new Date().toISOString()
     const relPath = 'library-test-fixtures/orig.jpg'
-    await Bun.write(join(env.UPLOADS_DIR, relPath), new Uint8Array([1, 2, 3, 4]))
+    await Bun.write(join(env.SHARE_ROOT, relPath), new Uint8Array([1, 2, 3, 4]))
     const [row] = await testDb
       .insert(schema.images)
       .values({
-        root: 'uploads',
+        root: 'share',
         relPath,
         dir: 'library-test-fixtures',
         stem: 'orig',

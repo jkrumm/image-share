@@ -5,9 +5,13 @@ import { and, desc, eq, isNull } from 'drizzle-orm'
 import { db } from '../db/index.js'
 import { shares, shareTokens, type ShareRow, type ShareTokenRow } from '../db/schema.js'
 import { env } from '../env.js'
+import { shareImageCount, setShareImages } from '../lib/share-auth.js'
 
-// Share management (design §8). Passwords are hashed with Bun.password
-// (argon2id); the response never echoes the hash. Minted URLs use SHARE_BASE_URL.
+// Share management (design §8, role-based rework). A share is either a
+// `folder` (root+dir, live-filtered from the index) or a `selection`
+// (explicit ordered image ids in share_images). Each token carries a role
+// (view|download|full) governing which asset routes it can reach — see
+// share/routes.ts for the enforcement.
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
 
@@ -20,12 +24,12 @@ const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
 // admin boundary rather than mint a dead link.
 const RESERVED_SLUGS = new Set(['health', 's', 'api', 'admin', 'openapi'])
 
-// Shares can only target roots that hold JPEG-kind rows. RAWS_ROOT is a flat
-// `.RAF` tree (every row kind='raw'), and the share content query hard-requires
-// kind='jpeg' — a `root:'raws'` share can therefore never contain an image.
-// RAW downloads ride along on a library-rooted share via `includeRaws`, never as
-// the share's own root (design §7, PRD.md). Accept only library/uploads.
-const ShareRootEnum = z.enum(['library', 'uploads'])
+// Folder shares can only target roots that hold JPEG-kind rows. RAWS_ROOT is a
+// flat `.RAF` tree (every row kind='raw'), and the folder content query
+// hard-requires kind='jpeg' — a `root:'raws'` share can therefore never
+// contain an image. RAW downloads ride along on a fuji/share-rooted share via
+// a full-role token, never as the share's own root.
+const ShareRootEnum = z.enum(['fuji', 'share'])
 
 // Expiry must be a real ISO 8601 instant (with `Z` or an offset) or an ISO
 // `YYYY-MM-DD` date (the admin date-picker emits the latter). Anything else —
@@ -37,6 +41,8 @@ const ExpiresAtSchema = z
   .nullable()
   .optional()
 
+const TokenRoleEnum = z.enum(['view', 'download', 'full'])
+
 function generateToken(): string {
   return randomBytes(24).toString('base64url')
 }
@@ -45,9 +51,47 @@ function mintUrl(slug: string, token: string): string {
   return `${env.SHARE_BASE_URL}/${slug}?token=${token}`
 }
 
+/** Lowercase/hyphenate a title into a slug base: non-alphanumerics collapse to
+ * a single `-`, leading/trailing hyphens trim, result truncates to 64 chars
+ * (re-trimming any hyphen the truncation exposed). Falls back to 'share' if
+ * the title has no alphanumeric content at all. */
+function deriveSlugBase(title: string): string {
+  const collapsed = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  const truncated = collapsed.slice(0, 64).replace(/-+$/g, '')
+  return truncated.length > 0 ? truncated : 'share'
+}
+
+async function slugTaken(slug: string): Promise<boolean> {
+  const [row] = await db
+    .select({ id: shares.id })
+    .from(shares)
+    .where(eq(shares.slug, slug))
+    .limit(1)
+  return row !== undefined
+}
+
+/** Derive a unique slug from a title, appending `-2`, `-3`, … on collision
+ * with an existing or reserved slug (design §8). */
+async function deriveUniqueSlug(title: string): Promise<string> {
+  const base = deriveSlugBase(title)
+  let candidate = base
+  let n = 2
+  while (RESERVED_SLUGS.has(candidate) || (await slugTaken(candidate))) {
+    const suffix = `-${n}`
+    const truncatedBase = base.slice(0, 64 - suffix.length).replace(/-+$/g, '')
+    candidate = `${truncatedBase}${suffix}`
+    n++
+  }
+  return candidate
+}
+
 const TokenDto = z.object({
   id: z.number().int(),
-  token: z.string(),
+  role: TokenRoleEnum,
+  label: z.string().nullable(),
   createdAt: z.string(),
   revokedAt: z.string().nullable(),
   url: z.string().describe('Minted share URL: SHARE_BASE_URL/<slug>?token=<token>'),
@@ -56,7 +100,8 @@ const TokenDto = z.object({
 function toTokenDto(slug: string, row: ShareTokenRow): z.infer<typeof TokenDto> {
   return {
     id: row.id,
-    token: row.token,
+    role: row.role as z.infer<typeof TokenDto>['role'],
+    label: row.label,
     createdAt: row.createdAt,
     revokedAt: row.revokedAt,
     url: mintUrl(slug, row.token),
@@ -66,63 +111,74 @@ function toTokenDto(slug: string, row: ShareTokenRow): z.infer<typeof TokenDto> 
 const ShareDto = z.object({
   id: z.number().int(),
   slug: z.string(),
-  root: z.enum(['library', 'raws', 'uploads']),
-  dir: z.string(),
+  title: z.string(),
+  sourceType: z.enum(['folder', 'selection']),
+  root: ShareRootEnum.nullable(),
+  dir: z.string().nullable(),
   minRating: z.number().int().nullable(),
-  sizeLimit: z.enum(['medium', 'full']),
-  includeRaws: z.boolean(),
-  hasPassword: z.boolean(),
   expiresAt: z.string().nullable(),
   note: z.string().nullable(),
   createdAt: z.string(),
+  imageCount: z.number().int(),
   tokens: z.array(TokenDto),
 })
 
-function toShareDto(row: ShareRow, tokens: ShareTokenRow[]): z.infer<typeof ShareDto> {
+async function toShareDto(
+  row: ShareRow,
+  tokens: ShareTokenRow[],
+): Promise<z.infer<typeof ShareDto>> {
   return {
     id: row.id,
     slug: row.slug,
+    title: row.title,
+    sourceType: row.sourceType as z.infer<typeof ShareDto>['sourceType'],
     root: row.root as z.infer<typeof ShareDto>['root'],
     dir: row.dir,
     minRating: row.minRating,
-    sizeLimit: row.sizeLimit as z.infer<typeof ShareDto>['sizeLimit'],
-    includeRaws: row.includeRaws === 1,
-    hasPassword: row.passwordHash !== null,
     expiresAt: row.expiresAt,
     note: row.note,
     createdAt: row.createdAt,
+    imageCount: await shareImageCount(row),
     tokens: tokens.toSorted((a, b) => a.id - b.id).map((t) => toTokenDto(row.slug, t)),
   }
 }
 
-const CreateShareBody = z.object({
-  slug: z.string().regex(SLUG_RE),
+const FolderSource = z.object({
+  type: z.literal('folder'),
   root: ShareRootEnum,
   dir: z.string(),
   minRating: z.number().int().min(0).max(5).nullable().optional(),
-  sizeLimit: z.enum(['medium', 'full']),
-  includeRaws: z.boolean().default(false),
-  password: z.string().min(1).nullable().optional(),
+})
+
+const SelectionSource = z.object({
+  type: z.literal('selection'),
+  imageIds: z.array(z.number().int()).min(1),
+})
+
+const ShareSource = z.discriminatedUnion('type', [FolderSource, SelectionSource])
+
+const CreateShareBody = z.object({
+  slug: z.string().regex(SLUG_RE).optional().describe('Auto-derived from title when omitted'),
+  title: z.string().min(1),
+  note: z.string().nullable().optional(),
   expiresAt: ExpiresAtSchema.describe('ISO 8601 expiry (date or datetime), null for none'),
-  note: z.string().nullable().optional(),
+  source: ShareSource,
 })
 
-// PATCH: same fields, all optional; password: string sets, null clears.
 const UpdateShareBody = z.object({
-  slug: z.string().regex(SLUG_RE).optional(),
-  root: ShareRootEnum.optional(),
-  dir: z.string().optional(),
-  minRating: z.number().int().min(0).max(5).nullable().optional(),
-  sizeLimit: z.enum(['medium', 'full']).optional(),
-  includeRaws: z.boolean().optional(),
-  password: z.string().min(1).nullable().optional(),
-  expiresAt: ExpiresAtSchema,
+  title: z.string().min(1).optional(),
   note: z.string().nullable().optional(),
+  expiresAt: ExpiresAtSchema,
+  minRating: z.number().int().min(0).max(5).nullable().optional(),
+  imageIds: z
+    .array(z.number().int())
+    .optional()
+    .describe('Replaces the image set (position = array order) — selection shares only'),
 })
 
-const MintedToken = z.object({
-  token: z.string(),
-  url: z.string(),
+const CreateTokenBody = z.object({
+  role: TokenRoleEnum,
+  label: z.string().nullable().optional(),
 })
 
 export const sharesRoutes = new Elysia({ name: 'shares-admin' })
@@ -131,10 +187,12 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
     async () => {
       const shareRows = await db.select().from(shares).orderBy(desc(shares.createdAt))
       const tokenRows = await db.select().from(shareTokens)
-      const data = shareRows.map((share) =>
-        toShareDto(
-          share,
-          tokenRows.filter((t) => t.shareId === share.id),
+      const data = await Promise.all(
+        shareRows.map((share) =>
+          toShareDto(
+            share,
+            tokenRows.filter((t) => t.shareId === share.id),
+          ),
         ),
       )
       return { data }
@@ -143,9 +201,9 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
       response: { 200: z.object({ data: z.array(ShareDto) }) },
       detail: {
         tags: ['Shares'],
-        summary: 'List shares with tokens and minted URLs',
+        summary: 'List shares with tokens, image counts, and minted URLs',
         description:
-          'Returns every share with its (active + revoked) tokens and the minted SHARE_BASE_URL/<slug>?token=… links. Password hashes are never returned — `hasPassword` reflects whether one is set.',
+          'Returns every share (folder or selection) with its (active + revoked) tokens, each token’s role, and the minted SHARE_BASE_URL/<slug>?token=… links.',
         security: [{ BearerAuth: [] }],
       },
     },
@@ -153,27 +211,26 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
   .post(
     '/api/shares',
     async ({ body, set, status }) => {
-      if (RESERVED_SLUGS.has(body.slug)) return status(400, `slug is reserved: ${body.slug}`)
-      const [slugTaken] = await db
-        .select({ id: shares.id })
-        .from(shares)
-        .where(eq(shares.slug, body.slug))
-        .limit(1)
-      if (slugTaken) return status(400, `slug already in use: ${body.slug}`)
+      let slug = body.slug
+      if (slug !== undefined) {
+        if (RESERVED_SLUGS.has(slug)) return status(400, `slug is reserved: ${slug}`)
+        if (await slugTaken(slug)) return status(400, `slug already in use: ${slug}`)
+      } else {
+        slug = await deriveUniqueSlug(body.title)
+      }
 
       const now = new Date().toISOString()
-      const passwordHash = body.password ? await Bun.password.hash(body.password) : null
+      const source = body.source
 
       const [share] = await db
         .insert(shares)
         .values({
-          slug: body.slug,
-          root: body.root,
-          dir: body.dir,
-          minRating: body.minRating ?? null,
-          sizeLimit: body.sizeLimit,
-          includeRaws: body.includeRaws ? 1 : 0,
-          passwordHash,
+          slug,
+          title: body.title,
+          sourceType: source.type,
+          root: source.type === 'folder' ? source.root : null,
+          dir: source.type === 'folder' ? source.dir : null,
+          minRating: source.type === 'folder' ? (source.minRating ?? null) : null,
           expiresAt: body.expiresAt ?? null,
           note: body.note ?? null,
           createdAt: now,
@@ -181,15 +238,19 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
         .returning()
       if (!share) throw new Error('failed to create share')
 
+      if (source.type === 'selection') {
+        await setShareImages(share.id, source.imageIds)
+      }
+
       const token = generateToken()
       const [tokenRow] = await db
         .insert(shareTokens)
-        .values({ shareId: share.id, token, createdAt: now })
+        .values({ shareId: share.id, token, role: 'view', createdAt: now })
         .returning()
       if (!tokenRow) throw new Error('failed to create share token')
 
       set.status = 201
-      return toShareDto(share, [tokenRow])
+      return await toShareDto(share, [tokenRow])
     },
     {
       body: CreateShareBody,
@@ -198,7 +259,7 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
         tags: ['Shares'],
         summary: 'Create a share',
         description:
-          'Creates a share for a folder (root+dir), hashes the optional password (argon2id), and mints the first token. sizeLimit=medium serves med renditions only; full unlocks originals (+ RAFs when includeRaws). Returns the created share with its first token + URL.',
+          'Creates a folder share (root+dir, optionally minRating-filtered) or a selection share (explicit ordered image ids), and mints the first token with role=view. `slug` auto-derives from `title` (with `-2`/`-3`… on collision) when omitted.',
         security: [{ BearerAuth: [] }],
       },
     },
@@ -209,38 +270,27 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
       const [existing] = await db.select().from(shares).where(eq(shares.id, params.id)).limit(1)
       if (!existing) return status(404, 'Share not found')
 
-      if (body.slug !== undefined && body.slug !== existing.slug) {
-        if (RESERVED_SLUGS.has(body.slug)) return status(400, `slug is reserved: ${body.slug}`)
-        const [slugTaken] = await db
-          .select({ id: shares.id })
-          .from(shares)
-          .where(eq(shares.slug, body.slug))
-          .limit(1)
-        if (slugTaken) return status(400, `slug already in use: ${body.slug}`)
+      if (body.imageIds !== undefined && existing.sourceType !== 'selection') {
+        return status(400, 'imageIds can only be set on a selection share')
       }
 
       const updates: Partial<typeof shares.$inferInsert> = {}
-      if (body.slug !== undefined) updates.slug = body.slug
-      if (body.root !== undefined) updates.root = body.root
-      if (body.dir !== undefined) updates.dir = body.dir
+      if (body.title !== undefined) updates.title = body.title
       if (body.minRating !== undefined) updates.minRating = body.minRating
-      if (body.sizeLimit !== undefined) updates.sizeLimit = body.sizeLimit
-      if (body.includeRaws !== undefined) updates.includeRaws = body.includeRaws ? 1 : 0
-      if (body.password !== undefined) {
-        updates.passwordHash =
-          body.password === null ? null : await Bun.password.hash(body.password)
-      }
       if (body.expiresAt !== undefined) updates.expiresAt = body.expiresAt
       if (body.note !== undefined) updates.note = body.note
 
       if (Object.keys(updates).length > 0) {
         await db.update(shares).set(updates).where(eq(shares.id, params.id))
       }
+      if (body.imageIds !== undefined) {
+        await setShareImages(params.id, body.imageIds)
+      }
 
       const [updated] = await db.select().from(shares).where(eq(shares.id, params.id)).limit(1)
       if (!updated) throw new Error('share disappeared mid-update')
       const tokens = await db.select().from(shareTokens).where(eq(shareTokens.shareId, params.id))
-      return toShareDto(updated, tokens)
+      return await toShareDto(updated, tokens)
     },
     {
       params: z.object({ id: z.coerce.number().int() }),
@@ -250,7 +300,7 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
         tags: ['Shares'],
         summary: 'Update a share',
         description:
-          'Partial update of a share. `password: "<value>"` sets/replaces the password; `password: null` clears it; omitting it leaves it unchanged. Does not roll tokens — use POST /shares/:id/roll for that.',
+          'Partial update of title/note/expiresAt/minRating. `imageIds` replaces a selection share’s image set (position = array order) — rejected on a folder share. Does not manage tokens — see POST /shares/:id/tokens, /roll, and /tokens/:tokenId/revoke.',
         security: [{ BearerAuth: [] }],
       },
     },
@@ -275,7 +325,8 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
       detail: {
         tags: ['Shares'],
         summary: 'Delete a share',
-        description: 'Deletes a share and all its tokens. Existing links stop working immediately.',
+        description:
+          'Deletes a share, its tokens, and (via cascading FK) its share_images rows if it was a selection share. Existing links stop working immediately.',
         security: [{ BearerAuth: [] }],
       },
     },
@@ -286,50 +337,102 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
       const [existing] = await db.select().from(shares).where(eq(shares.id, params.id)).limit(1)
       if (!existing) return status(404, 'Share not found')
 
-      const now = new Date().toISOString()
-      await db
-        .update(shareTokens)
-        .set({ revokedAt: now })
+      const active = await db
+        .select()
+        .from(shareTokens)
         .where(and(eq(shareTokens.shareId, params.id), isNull(shareTokens.revokedAt)))
 
-      const token = generateToken()
-      await db.insert(shareTokens).values({ shareId: params.id, token, createdAt: now })
+      const now = new Date().toISOString()
+      const minted: ShareTokenRow[] = []
+      for (const old of active) {
+        await db.update(shareTokens).set({ revokedAt: now }).where(eq(shareTokens.id, old.id))
+        const [replacement] = await db
+          .insert(shareTokens)
+          .values({
+            shareId: params.id,
+            token: generateToken(),
+            role: old.role,
+            label: old.label,
+            createdAt: now,
+          })
+          .returning()
+        if (!replacement) throw new Error('failed to mint replacement token')
+        minted.push(replacement)
+      }
 
-      return { token, url: mintUrl(existing.slug, token) }
+      return { tokens: minted.map((t) => toTokenDto(existing.slug, t)) }
     },
     {
       params: z.object({ id: z.coerce.number().int() }),
-      response: { 200: MintedToken, 404: z.string() },
+      response: { 200: z.object({ tokens: z.array(TokenDto) }), 404: z.string() },
       detail: {
         tags: ['Shares'],
-        summary: 'Roll the share token',
+        summary: 'Roll every active token on the share',
         description:
-          'Revokes all active tokens for the share and mints a new one — revokes access without changing the slug. Returns the new token + URL. For an additional parallel link to the SAME share (without revoking), use POST /shares/:id/tokens.',
+          'Revokes every currently-active token for the share and mints a same-role replacement for each — refreshes every outstanding link without changing who can do what. Returns the newly-minted tokens.',
         security: [{ BearerAuth: [] }],
       },
     },
   )
   .post(
     '/api/shares/:id/tokens',
-    async ({ params, set, status }) => {
+    async ({ params, body, set, status }) => {
       const [existing] = await db.select().from(shares).where(eq(shares.id, params.id)).limit(1)
       if (!existing) return status(404, 'Share not found')
 
       const now = new Date().toISOString()
-      const token = generateToken()
-      await db.insert(shareTokens).values({ shareId: params.id, token, createdAt: now })
+      const [tokenRow] = await db
+        .insert(shareTokens)
+        .values({
+          shareId: params.id,
+          token: generateToken(),
+          role: body.role,
+          label: body.label ?? null,
+          createdAt: now,
+        })
+        .returning()
+      if (!tokenRow) throw new Error('failed to create share token')
 
       set.status = 201
-      return { token, url: mintUrl(existing.slug, token) }
+      return toTokenDto(existing.slug, tokenRow)
     },
     {
       params: z.object({ id: z.coerce.number().int() }),
-      response: { 201: MintedToken, 404: z.string() },
+      body: CreateTokenBody,
+      response: { 201: TokenDto, 404: z.string() },
       detail: {
         tags: ['Shares'],
-        summary: 'Add an additional token to a share',
+        summary: 'Mint an additional token on a share',
         description:
-          'Mints an additional, non-revoking token for the same share — for handing a second parallel link to another recipient of the same folder. Distinct from POST /shares/:id/roll, which revokes the existing tokens.',
+          'Mints an additional, non-revoking token with the given role (+ optional label) — for handing a differently-scoped or parallel link to another recipient of the same share.',
+        security: [{ BearerAuth: [] }],
+      },
+    },
+  )
+  .post(
+    '/api/shares/:id/tokens/:tokenId/revoke',
+    async ({ params, status }) => {
+      const [tokenRow] = await db
+        .select()
+        .from(shareTokens)
+        .where(and(eq(shareTokens.id, params.tokenId), eq(shareTokens.shareId, params.id)))
+        .limit(1)
+      if (!tokenRow) return status(404, 'Token not found')
+
+      const now = new Date().toISOString()
+      await db.update(shareTokens).set({ revokedAt: now }).where(eq(shareTokens.id, params.tokenId))
+
+      const [share] = await db.select().from(shares).where(eq(shares.id, params.id)).limit(1)
+      if (!share) throw new Error('share disappeared mid-revoke')
+      return toTokenDto(share.slug, { ...tokenRow, revokedAt: now })
+    },
+    {
+      params: z.object({ id: z.coerce.number().int(), tokenId: z.coerce.number().int() }),
+      response: { 200: TokenDto, 404: z.string() },
+      detail: {
+        tags: ['Shares'],
+        summary: 'Revoke a single token',
+        description: 'Revokes exactly one token on the share, leaving its siblings untouched.',
         security: [{ BearerAuth: [] }],
       },
     },

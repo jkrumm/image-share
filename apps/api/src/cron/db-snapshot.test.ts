@@ -38,10 +38,10 @@ describe('runDbSnapshot', () => {
   it('VACUUM INTOs a non-empty file named after the weekday', async () => {
     await testDb.insert(schema.shares).values({
       slug: 'snapshot-test',
-      root: 'library',
+      title: 'Snapshot test',
+      sourceType: 'folder',
+      root: 'fuji',
       dir: 'x',
-      sizeLimit: 'medium',
-      includeRaws: 0,
       createdAt: new Date().toISOString(),
     })
 

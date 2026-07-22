@@ -18,19 +18,16 @@ export const Env = z.object({
   API_SECRET: z.string().min(1).default('dev-secret-change-me'),
 
   // ── Filesystem roots (design §3) ──────────────────────────────────────────
-  // LIBRARY_ROOT + RAWS_ROOT are READ-ONLY — the service never writes there.
-  LIBRARY_ROOT: z.string().default('./.dev/library'),
+  // FUJI_ROOT + RAWS_ROOT are READ-ONLY — the service never writes there.
+  // SHARE_ROOT is service-owned read-write (ingest lands here, root='share').
+  FUJI_ROOT: z.string().default('./.dev/fuji'),
   RAWS_ROOT: z.string().default('./.dev/raws'),
-  UPLOADS_DIR: z.string().default('./.dev/uploads'),
+  SHARE_ROOT: z.string().default('./.dev/share'),
   B2_MIRROR_DIR: z.string().default('./.dev/b2-mirror'),
   // DATA_DIR holds db/image-share.sqlite + renditions/ (rebuildable cache).
   DATA_DIR: z.string().default('./.dev/data'),
   // SNAPSHOT_DIR holds nightly VACUUM INTO snapshots (restic-covered in prod).
   SNAPSHOT_DIR: z.string().default('./.dev/backup'),
-
-  // Top-level dirs under LIBRARY_ROOT the indexer skips (comma list). Hidden
-  // dot-files/dirs are always skipped regardless of this list.
-  INDEX_EXCLUDE_DIRS: z.string().default('immich,Fotos-Mediathek.photoslibrary,Uploads,B2-Mirror'),
 
   // ── Share surface (design §7, §8) ─────────────────────────────────────────
   // Base for minted share URLs: `${SHARE_BASE_URL}/<slug>?token=…`. Prod =

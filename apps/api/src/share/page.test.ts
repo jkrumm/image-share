@@ -1,17 +1,16 @@
 import { describe, expect, it } from 'bun:test'
 import type { ImageRow, ShareRow } from '../db/schema.js'
-import { render404Page, renderSharePage, renderUnlockPage } from './page.js'
+import { render404Page, renderSharePage } from './page.js'
 
 function makeShare(overrides: Partial<ShareRow> = {}): ShareRow {
   return {
     id: 1,
     slug: 'mallorca-2026',
-    root: 'library',
+    title: 'Mallorca 2026',
+    sourceType: 'folder',
+    root: 'fuji',
     dir: 'mallorca-2026',
     minRating: null,
-    sizeLimit: 'medium',
-    includeRaws: 0,
-    passwordHash: null,
     expiresAt: null,
     note: null,
     createdAt: '2026-01-01T00:00:00.000Z',
@@ -22,7 +21,7 @@ function makeShare(overrides: Partial<ShareRow> = {}): ShareRow {
 function makeImage(overrides: Partial<ImageRow> = {}): ImageRow {
   return {
     id: 10,
-    root: 'library',
+    root: 'fuji',
     relPath: 'mallorca-2026/DSCF0001.JPG',
     dir: 'mallorca-2026',
     stem: 'DSCF0001',
@@ -42,53 +41,67 @@ function makeImage(overrides: Partial<ImageRow> = {}): ImageRow {
 }
 
 describe('renderSharePage', () => {
-  it('threads the token into every asset URL', () => {
+  it('threads the token into every asset URL and uses share.title', () => {
     const html = renderSharePage({
-      share: makeShare(),
+      share: makeShare({ title: 'Mallorca trip' }),
       images: [makeImage()],
       token: 'tok-abc123',
-      k: '',
+      role: 'download',
     })
-    // Grid thumb + srcset med and the zip button all carry the token. `&` is
-    // entity-escaped to `&amp;` in HTML attribute context (browsers decode it).
     expect(html).toContain('/s/mallorca-2026/img/10?size=thumb&amp;token=tok-abc123')
     expect(html).toContain('/s/mallorca-2026/img/10?size=med&amp;token=tok-abc123')
     expect(html).toContain('/s/mallorca-2026/zip?token=tok-abc123')
+    expect(html).toContain('Mallorca trip')
     expect(html).toContain('loading="lazy"')
     expect(html).toContain('<dialog id="lb">')
   })
 
-  it('threads k into URLs for password shares and keeps JS auth in sync', () => {
+  it('renders the note as plain text below the heading', () => {
     const html = renderSharePage({
-      share: makeShare({ passwordHash: 'x' }),
+      share: makeShare({ note: 'Shot on the Fuji, week of June 1st.' }),
       images: [makeImage()],
-      token: 'tok-abc123',
-      k: 'deadbeefcafebabe',
+      token: 't',
+      role: 'view',
     })
-    expect(html).toContain('token=tok-abc123&amp;k=deadbeefcafebabe')
-    // The embedded lightbox config also carries token + k.
-    expect(html).toContain('"token":"tok-abc123"')
-    expect(html).toContain('"k":"deadbeefcafebabe"')
+    expect(html).toContain('Shot on the Fuji, week of June 1st.')
   })
 
-  it('exposes full-size + RAW links only when the share permits them', () => {
-    const medium = renderSharePage({
-      share: makeShare({ sizeLimit: 'medium', includeRaws: 0 }),
+  it('view role: no download/zip affordances, no full size, no RAW', () => {
+    const html = renderSharePage({
+      share: makeShare(),
       images: [makeImage()],
       token: 't',
-      k: '',
+      role: 'view',
     })
-    expect(medium).toContain('"full":false')
-    expect(medium).not.toContain('id="lbraw"')
+    expect(html).toContain('"full":false')
+    expect(html).toContain('"download":false')
+    expect(html).not.toContain('Download all')
+    expect(html).not.toContain('id="lbdl"')
+    expect(html).not.toContain('id="lbraw"')
+  })
 
-    const full = renderSharePage({
-      share: makeShare({ sizeLimit: 'full', includeRaws: 1 }),
+  it('download role: download + zip shown, full size available, no RAW', () => {
+    const html = renderSharePage({
+      share: makeShare(),
+      images: [makeImage()],
+      token: 't',
+      role: 'download',
+    })
+    expect(html).toContain('"full":true')
+    expect(html).toContain('"download":true')
+    expect(html).toContain('Download all')
+    expect(html).toContain('id="lbdl"')
+    expect(html).not.toContain('id="lbraw"')
+  })
+
+  it('full role: RAW link also shown', () => {
+    const html = renderSharePage({
+      share: makeShare(),
       images: [makeImage({ rawPath: 'DSCF0001.RAF' })],
       token: 't',
-      k: '',
+      role: 'full',
     })
-    expect(full).toContain('"full":true')
-    expect(full).toContain('id="lbraw"')
+    expect(html).toContain('id="lbraw"')
   })
 
   it('HTML-escapes malicious filenames in both attribute and JSON contexts', () => {
@@ -97,7 +110,7 @@ describe('renderSharePage', () => {
       share: makeShare(),
       images: [makeImage({ relPath: evil, stem: '"><img src=x onerror=alert(1)>' })],
       token: 't',
-      k: '',
+      role: 'full',
     })
     // No breakout: the injected tag must never appear unescaped.
     expect(html).not.toContain('<img src=x onerror=alert(1)>')
@@ -109,23 +122,9 @@ describe('renderSharePage', () => {
   })
 
   it('renders an empty-state without a download button when there are no images', () => {
-    const html = renderSharePage({ share: makeShare(), images: [], token: 't', k: '' })
+    const html = renderSharePage({ share: makeShare(), images: [], token: 't', role: 'full' })
     expect(html).toContain('No photos in this share yet.')
     expect(html).not.toContain('Download all')
-  })
-})
-
-describe('renderUnlockPage', () => {
-  it('posts the password to the unlock endpoint with the token in the query', () => {
-    const html = renderUnlockPage({ slug: 'mallorca-2026', token: 'tok-abc123' })
-    expect(html).toContain('action="/s/mallorca-2026/unlock?token=tok-abc123"')
-    expect(html).toContain('type="password"')
-    expect(html).not.toContain('Incorrect password')
-  })
-
-  it('shows the error message on a failed attempt', () => {
-    const html = renderUnlockPage({ slug: 'x', token: 't', error: true })
-    expect(html).toContain('Incorrect password')
   })
 })
 

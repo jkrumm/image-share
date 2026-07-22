@@ -35,9 +35,32 @@ function buildApp() {
   return new Elysia().use(sharesRoutes)
 }
 
+// share_images.image_id is a real FK to images.id (foreign_keys=ON) — a
+// selection share's imageIds must reference actual rows.
+async function seedImage(relPath: string): Promise<number> {
+  const now = new Date().toISOString()
+  const [row] = await testDb
+    .insert(schema.images)
+    .values({
+      root: 'fuji',
+      relPath,
+      dir: '',
+      stem: relPath.replace(/\.jpg$/, ''),
+      ext: 'jpg',
+      kind: 'jpeg',
+      fileSize: 1,
+      mtimeMs: 1,
+      indexedAt: now,
+    })
+    .returning({ id: schema.images.id })
+  if (!row) throw new Error('seed failed')
+  return row.id
+}
+
 interface TokenDto {
   id: number
-  token: string
+  role: string
+  label: string | null
   createdAt: string
   revokedAt: string | null
   url: string
@@ -46,96 +69,177 @@ interface TokenDto {
 interface ShareDto {
   id: number
   slug: string
-  root: string
-  dir: string
-  sizeLimit: string
-  includeRaws: boolean
-  hasPassword: boolean
+  title: string
+  sourceType: string
+  root: string | null
+  dir: string | null
+  imageCount: number
   tokens: TokenDto[]
 }
 
-describe('shares CRUD + roll lifecycle', () => {
-  it('creates a share with a minted first token', async () => {
-    const app = buildApp()
-    const res = await app.handle(
-      new Request('http://localhost/api/shares', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          slug: 'mallorca-2026',
-          root: 'library',
-          dir: 'mallorca-2026',
-          sizeLimit: 'medium',
-          includeRaws: false,
-        }),
-      }),
-    )
+function post(payload: Record<string, unknown>): Promise<Response> {
+  return buildApp().handle(
+    new Request('http://localhost/api/shares', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
+  )
+}
+
+const folderSource = { type: 'folder', root: 'fuji', dir: 'x' } as const
+
+describe('POST /api/shares — folder + selection creation', () => {
+  it('creates a folder share with an explicit slug and a minted view token', async () => {
+    const res = await post({ slug: 'mallorca-2026', title: 'Mallorca 2026', source: folderSource })
     expect(res.status).toBe(201)
     const body = (await res.json()) as ShareDto
     expect(body.slug).toBe('mallorca-2026')
-    expect(body.hasPassword).toBe(false)
+    expect(body.sourceType).toBe('folder')
+    expect(body.root).toBe('fuji')
     expect(body.tokens).toHaveLength(1)
-    expect(body.tokens[0]?.url).toContain(`token=${body.tokens[0]?.token}`)
+    expect(body.tokens[0]?.role).toBe('view')
+    expect(body.tokens[0]?.url).toContain(`token=`)
   })
 
-  it('rejects a duplicate slug', async () => {
+  it('rejects a duplicate explicit slug', async () => {
+    const res = await post({ slug: 'mallorca-2026', title: 'Again', source: folderSource })
+    expect(res.status).toBe(400)
+  })
+
+  it('auto-derives a slug from the title when slug is omitted', async () => {
+    const res = await post({ title: 'Summer Trip!! 2026', source: folderSource })
+    expect(res.status).toBe(201)
+    const body = (await res.json()) as ShareDto
+    expect(body.slug).toBe('summer-trip-2026')
+  })
+
+  it('appends -2 on a title-derived collision', async () => {
+    const res = await post({ title: 'Summer Trip!! 2026', source: folderSource })
+    expect(res.status).toBe(201)
+    const body = (await res.json()) as ShareDto
+    expect(body.slug).toBe('summer-trip-2026-2')
+  })
+
+  it('creates a selection share and populates share_images', async () => {
+    const a = await seedImage('picks-a.jpg')
+    const b = await seedImage('picks-b.jpg')
+    const c = await seedImage('picks-c.jpg')
+
+    const res = await post({
+      title: 'Picks',
+      source: { type: 'selection', imageIds: [a, b, c] },
+    })
+    expect(res.status).toBe(201)
+    const body = (await res.json()) as ShareDto
+    expect(body.sourceType).toBe('selection')
+    expect(body.root).toBeNull()
+    expect(body.dir).toBeNull()
+    expect(body.imageCount).toBe(3)
+  })
+})
+
+describe('shares input validation (boundary rejects)', () => {
+  it('rejects a malformed expiresAt so it can never fail open at the read path', async () => {
+    for (const expiresAt of [
+      'not-a-date',
+      '31.12.2026',
+      '31/12/2026',
+      '2026-12-31 18:00 CET',
+      '1767225600',
+    ]) {
+      const res = await post({
+        title: `bad-${Math.random().toString(36).slice(2)}`,
+        source: folderSource,
+        expiresAt,
+      })
+      expect(res.status).toBe(422)
+    }
+  })
+
+  it('accepts a valid ISO date and datetime expiry', async () => {
+    const dateRes = await post({ title: 'exp-date', source: folderSource, expiresAt: '2026-12-31' })
+    expect(dateRes.status).toBe(201)
+    const dtRes = await post({
+      title: 'exp-datetime',
+      source: folderSource,
+      expiresAt: '2026-12-31T18:00:00Z',
+    })
+    expect(dtRes.status).toBe(201)
+  })
+
+  it('rejects a raws-rooted folder share (would be permanently empty)', async () => {
+    const res = await post({
+      title: 'raws share',
+      source: { type: 'folder', root: 'raws', dir: 'x' },
+    })
+    expect(res.status).toBe(422)
+  })
+
+  it('rejects reserved explicit slugs that would collide with the Caddy passthroughs', async () => {
+    for (const slug of ['health', 's', 'api', 'admin', 'openapi']) {
+      const res = await post({ slug, title: 'reserved test', source: folderSource })
+      expect(res.status).toBe(400)
+    }
+  })
+})
+
+describe('PATCH /api/shares/:id', () => {
+  it('updates title/note/expiresAt/minRating on a folder share', async () => {
+    const created = (await (
+      await post({ title: 'patch-me', source: folderSource })
+    ).json()) as ShareDto
+
     const app = buildApp()
     const res = await app.handle(
-      new Request('http://localhost/api/shares', {
-        method: 'POST',
+      new Request(`http://localhost/api/shares/${created.id}`, {
+        method: 'PATCH',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          slug: 'mallorca-2026',
-          root: 'library',
-          dir: 'mallorca-2026',
-          sizeLimit: 'medium',
-          includeRaws: false,
-        }),
+        body: JSON.stringify({ note: 'friends album', minRating: 4 }),
+      }),
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as ShareDto & { note: string | null; minRating: number | null }
+    expect(body.note).toBe('friends album')
+    expect(body.minRating).toBe(4)
+    expect(body.title).toBe('patch-me') // unchanged field survives partial update
+  })
+
+  it('rejects imageIds on a folder share', async () => {
+    const created = (await (
+      await post({ title: 'folder-not-selection', source: folderSource })
+    ).json()) as ShareDto
+    const app = buildApp()
+    const res = await app.handle(
+      new Request(`http://localhost/api/shares/${created.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ imageIds: [1, 2] }),
       }),
     )
     expect(res.status).toBe(400)
   })
 
-  it('lists shares with tokens + minted URLs', async () => {
-    const app = buildApp()
-    const res = await app.handle(new Request('http://localhost/api/shares'))
-    expect(res.status).toBe(200)
-    const body = (await res.json()) as { data: ShareDto[] }
-    expect(body.data.some((s) => s.slug === 'mallorca-2026')).toBe(true)
-  })
-
-  it('updates a share via PATCH (partial)', async () => {
-    const createApp = buildApp()
-    const created = await (
-      await createApp.handle(
-        new Request('http://localhost/api/shares', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            slug: 'patch-me',
-            root: 'library',
-            dir: 'foo',
-            sizeLimit: 'medium',
-            includeRaws: false,
-          }),
-        }),
-      )
-    ).json()
-    const shareId = (created as ShareDto).id
+  it('replaces a selection share’s image set with imageIds', async () => {
+    const a = await seedImage('patch-a.jpg')
+    const b = await seedImage('patch-b.jpg')
+    const c = await seedImage('patch-c.jpg')
+    const created = (await (
+      await post({ title: 'selection-patch', source: { type: 'selection', imageIds: [a, b] } })
+    ).json()) as ShareDto
+    expect(created.imageCount).toBe(2)
 
     const app = buildApp()
     const res = await app.handle(
-      new Request(`http://localhost/api/shares/${shareId}`, {
+      new Request(`http://localhost/api/shares/${created.id}`, {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ note: 'friends album', sizeLimit: 'full' }),
+        body: JSON.stringify({ imageIds: [c] }),
       }),
     )
     expect(res.status).toBe(200)
-    const body = (await res.json()) as ShareDto & { note: string | null; sizeLimit: string }
-    expect(body.note).toBe('friends album')
-    expect(body.sizeLimit).toBe('full')
-    expect(body.slug).toBe('patch-me') // unchanged field survives partial update
+    const body = (await res.json()) as ShareDto
+    expect(body.imageCount).toBe(1)
   })
 
   it('404s PATCH/DELETE on an unknown id', async () => {
@@ -154,72 +258,64 @@ describe('shares CRUD + roll lifecycle', () => {
     )
     expect(deleteRes.status).toBe(404)
   })
+})
 
-  it('rolls the token: old token revoked, new token minted', async () => {
-    const createApp = buildApp()
+describe('token lifecycle: roll / add / revoke', () => {
+  it('rolls every active token, preserving each one’s role', async () => {
     const created = (await (
-      await createApp.handle(
-        new Request('http://localhost/api/shares', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            slug: 'roll-me',
-            root: 'library',
-            dir: 'roll',
-            sizeLimit: 'medium',
-            includeRaws: false,
-          }),
-        }),
-      )
+      await post({ title: 'roll-me', source: folderSource })
     ).json()) as ShareDto
-    const oldToken = created.tokens[0]?.token
-    expect(oldToken).toBeTruthy()
+    const viewToken = created.tokens[0]
+    expect(viewToken?.role).toBe('view')
+
+    // Add a second, differently-scoped token so roll must handle >1 token.
+    const addApp = buildApp()
+    const addRes = await addApp.handle(
+      new Request(`http://localhost/api/shares/${created.id}/tokens`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ role: 'full', label: 'grandma' }),
+      }),
+    )
+    expect(addRes.status).toBe(201)
 
     const rollApp = buildApp()
     const rollRes = await rollApp.handle(
       new Request(`http://localhost/api/shares/${created.id}/roll`, { method: 'POST' }),
     )
     expect(rollRes.status).toBe(200)
-    const rolled = (await rollRes.json()) as { token: string; url: string }
-    expect(rolled.token).not.toBe(oldToken)
+    const rolled = (await rollRes.json()) as { tokens: TokenDto[] }
+    expect(rolled.tokens).toHaveLength(2)
+    expect(rolled.tokens.map((t) => t.role).toSorted()).toEqual(['full', 'view'])
+    expect(rolled.tokens.find((t) => t.role === 'full')?.label).toBe('grandma')
 
     const listApp = buildApp()
     const listed = (await (
       await listApp.handle(new Request(`http://localhost/api/shares`))
     ).json()) as { data: ShareDto[] }
     const share = listed.data.find((s) => s.id === created.id)
-    expect(share).toBeDefined()
-    const oldTokenRow = share?.tokens.find((t) => t.token === oldToken)
-    const newTokenRow = share?.tokens.find((t) => t.token === rolled.token)
-    expect(oldTokenRow?.revokedAt).not.toBeNull()
-    expect(newTokenRow?.revokedAt).toBeNull()
+    expect(share?.tokens).toHaveLength(4) // 2 originals (revoked) + 2 replacements
+    const activeCount = share?.tokens.filter((t) => t.revokedAt === null).length
+    expect(activeCount).toBe(2)
   })
 
   it('adds a parallel token without revoking the existing one', async () => {
-    const createApp = buildApp()
     const created = (await (
-      await createApp.handle(
-        new Request('http://localhost/api/shares', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            slug: 'add-token',
-            root: 'library',
-            dir: 'add',
-            sizeLimit: 'medium',
-            includeRaws: false,
-          }),
-        }),
-      )
+      await post({ title: 'add-token', source: folderSource })
     ).json()) as ShareDto
-    const firstToken = created.tokens[0]?.token
+    const firstToken = created.tokens[0]?.id
 
     const addApp = buildApp()
     const addRes = await addApp.handle(
-      new Request(`http://localhost/api/shares/${created.id}/tokens`, { method: 'POST' }),
+      new Request(`http://localhost/api/shares/${created.id}/tokens`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ role: 'download' }),
+      }),
     )
     expect(addRes.status).toBe(201)
-    const added = (await addRes.json()) as { token: string; url: string }
+    const added = (await addRes.json()) as TokenDto
+    expect(added.role).toBe('download')
 
     const listApp = buildApp()
     const listed = (await (
@@ -227,28 +323,62 @@ describe('shares CRUD + roll lifecycle', () => {
     ).json()) as { data: ShareDto[] }
     const share = listed.data.find((s) => s.id === created.id)
     expect(share?.tokens).toHaveLength(2)
-    const firstRow = share?.tokens.find((t) => t.token === firstToken)
-    const secondRow = share?.tokens.find((t) => t.token === added.token)
-    expect(firstRow?.revokedAt).toBeNull()
-    expect(secondRow?.revokedAt).toBeNull()
+    expect(share?.tokens.find((t) => t.id === firstToken)?.revokedAt).toBeNull()
+    expect(share?.tokens.find((t) => t.id === added.id)?.revokedAt).toBeNull()
   })
 
-  it('deletes a share and its tokens', async () => {
-    const createApp = buildApp()
+  it('revokes a single token, leaving siblings untouched', async () => {
     const created = (await (
-      await createApp.handle(
-        new Request('http://localhost/api/shares', {
+      await post({ title: 'revoke-one', source: folderSource })
+    ).json()) as ShareDto
+    const addApp = buildApp()
+    const added = (await (
+      await addApp.handle(
+        new Request(`http://localhost/api/shares/${created.id}/tokens`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            slug: 'delete-me',
-            root: 'library',
-            dir: 'x',
-            sizeLimit: 'medium',
-            includeRaws: false,
-          }),
+          body: JSON.stringify({ role: 'full' }),
         }),
       )
+    ).json()) as TokenDto
+
+    const revokeApp = buildApp()
+    const revokeRes = await revokeApp.handle(
+      new Request(`http://localhost/api/shares/${created.id}/tokens/${added.id}/revoke`, {
+        method: 'POST',
+      }),
+    )
+    expect(revokeRes.status).toBe(200)
+    const revoked = (await revokeRes.json()) as TokenDto
+    expect(revoked.revokedAt).not.toBeNull()
+
+    const listApp = buildApp()
+    const listed = (await (
+      await listApp.handle(new Request(`http://localhost/api/shares`))
+    ).json()) as { data: ShareDto[] }
+    const share = listed.data.find((s) => s.id === created.id)
+    expect(share?.tokens.find((t) => t.id === created.tokens[0]?.id)?.revokedAt).toBeNull()
+    expect(share?.tokens.find((t) => t.id === added.id)?.revokedAt).not.toBeNull()
+  })
+
+  it('404s revoking an unknown token id', async () => {
+    const created = (await (
+      await post({ title: 'revoke-404', source: folderSource })
+    ).json()) as ShareDto
+    const app = buildApp()
+    const res = await app.handle(
+      new Request(`http://localhost/api/shares/${created.id}/tokens/999999/revoke`, {
+        method: 'POST',
+      }),
+    )
+    expect(res.status).toBe(404)
+  })
+})
+
+describe('DELETE /api/shares/:id', () => {
+  it('deletes a share and its tokens', async () => {
+    const created = (await (
+      await post({ title: 'delete-me', source: folderSource })
     ).json()) as ShareDto
 
     const deleteApp = buildApp()
@@ -263,79 +393,5 @@ describe('shares CRUD + roll lifecycle', () => {
       await listApp.handle(new Request(`http://localhost/api/shares`))
     ).json()) as { data: ShareDto[] }
     expect(listed.data.some((s) => s.id === created.id)).toBe(false)
-  })
-
-  it('password-protected share hashes the password (never echoed)', async () => {
-    const app = buildApp()
-    const res = await app.handle(
-      new Request('http://localhost/api/shares', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          slug: 'secret-album',
-          root: 'library',
-          dir: 'secret',
-          sizeLimit: 'full',
-          includeRaws: true,
-          password: 'correct-horse-battery-staple',
-        }),
-      }),
-    )
-    expect(res.status).toBe(201)
-    const body = (await res.json()) as ShareDto
-    expect(body.hasPassword).toBe(true)
-    expect(JSON.stringify(body)).not.toContain('correct-horse-battery-staple')
-  })
-})
-
-describe('shares input validation (boundary rejects)', () => {
-  function post(payload: Record<string, unknown>): Promise<Response> {
-    return buildApp().handle(
-      new Request('http://localhost/api/shares', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
-      }),
-    )
-  }
-
-  const base = { root: 'library', dir: 'x', sizeLimit: 'medium', includeRaws: false } as const
-
-  it('rejects a malformed expiresAt so it can never fail open at the read path', async () => {
-    // Every one of these Date.parse-es to NaN in the Bun runtime; NaN <= now is
-    // false, which is exactly why the read gate would otherwise never expire them.
-    for (const expiresAt of [
-      'not-a-date',
-      '31.12.2026',
-      '31/12/2026',
-      '2026-12-31 18:00 CET',
-      '1767225600',
-    ]) {
-      const res = await post({
-        ...base,
-        slug: `bad-${Math.random().toString(36).slice(2)}`,
-        expiresAt,
-      })
-      expect(res.status).toBe(422)
-    }
-  })
-
-  it('accepts a valid ISO date and datetime expiry', async () => {
-    const dateRes = await post({ ...base, slug: 'exp-date', expiresAt: '2026-12-31' })
-    expect(dateRes.status).toBe(201)
-    const dtRes = await post({ ...base, slug: 'exp-datetime', expiresAt: '2026-12-31T18:00:00Z' })
-    expect(dtRes.status).toBe(201)
-  })
-
-  it('rejects a raws-rooted share (would be permanently empty)', async () => {
-    const res = await post({ ...base, root: 'raws', slug: 'raws-share' })
-    expect(res.status).toBe(422)
-  })
-
-  it('rejects reserved slugs that would collide with the Caddy passthroughs', async () => {
-    for (const slug of ['health', 's', 'api', 'admin', 'openapi']) {
-      const res = await post({ ...base, slug })
-      expect(res.status).toBe(400)
-    }
   })
 })

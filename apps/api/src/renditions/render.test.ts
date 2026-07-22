@@ -79,7 +79,7 @@ describe('renderRendition', () => {
     const result = await renderRendition({
       absPath,
       size: 'thumb',
-      root: 'library',
+      root: 'fuji',
       relPath,
       mtimeMs: 1,
       fileSize: 1,
@@ -95,7 +95,7 @@ describe('renderRendition', () => {
     const result = await renderRendition({
       absPath,
       size: 'thumb',
-      root: 'library',
+      root: 'fuji',
       relPath: nextRelPath('landscape.jpg'),
       mtimeMs: 1,
       fileSize: 1,
@@ -113,7 +113,7 @@ describe('renderRendition', () => {
     const full = await renderRendition({
       absPath,
       size: 'full',
-      root: 'library',
+      root: 'fuji',
       relPath,
       mtimeMs,
       fileSize,
@@ -126,7 +126,7 @@ describe('renderRendition', () => {
     const med = await renderRendition({
       absPath,
       size: 'med',
-      root: 'library',
+      root: 'fuji',
       relPath,
       mtimeMs,
       fileSize,
@@ -139,7 +139,7 @@ describe('renderRendition', () => {
   it('does not re-render on a cache hit (source removed after first render still resolves)', async () => {
     const absPath = await makeFixture({ width: 300, height: 200 })
     const identity = {
-      root: 'library',
+      root: 'fuji',
       relPath: nextRelPath('hit.jpg'),
       mtimeMs: 42,
       fileSize: 999,
@@ -165,7 +165,7 @@ describe('renderRendition', () => {
   it('dedupes concurrent duplicate calls into a single in-flight render', async () => {
     const absPath = await makeFixture({ width: 300, height: 200 })
     const identity = {
-      root: 'library',
+      root: 'fuji',
       relPath: nextRelPath('concurrent.jpg'),
       mtimeMs: 7,
       fileSize: 123,

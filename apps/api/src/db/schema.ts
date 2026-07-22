@@ -1,4 +1,4 @@
-import { sqliteTable, integer, text, index, uniqueIndex } from 'drizzle-orm/sqlite-core'
+import { sqliteTable, integer, text, index, uniqueIndex, primaryKey } from 'drizzle-orm/sqlite-core'
 
 // SQLite schema (design §4). snake_case columns; WAL is enabled on open in
 // db/index.ts. The DB is a rebuildable cache EXCEPT `shares` / `share_tokens`
@@ -11,7 +11,7 @@ export const images = sqliteTable(
   'images',
   {
     id: integer('id').primaryKey({ autoIncrement: true }),
-    root: text('root').notNull(), // 'library' | 'raws' | 'uploads'
+    root: text('root').notNull(), // 'fuji' | 'raws' | 'share'
     relPath: text('rel_path').notNull(), // path relative to the root
     dir: text('dir').notNull(), // posix dirname of rel_path; '' at the root
     stem: text('stem').notNull(), // filename without extension
@@ -51,29 +51,55 @@ export const b2Objects = sqliteTable('b2_objects', {
 })
 
 // ── shares ─────────────────────────────────────────────────────────────────
-// A shared folder (design §7). NOT rebuildable — snapshotted nightly.
+// A shared folder OR a hand-picked selection of images (design §7). NOT
+// rebuildable — snapshotted nightly. `root`/`dir` are only set when
+// `source_type='folder'`; a `source_type='selection'` share's content lives in
+// `share_images` instead.
 export const shares = sqliteTable('shares', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   slug: text('slug').notNull().unique(), // ^[a-z0-9][a-z0-9-]{0,63}$
-  root: text('root').notNull(),
-  dir: text('dir').notNull(),
+  title: text('title').notNull(),
+  sourceType: text('source_type').notNull(), // 'folder' | 'selection'
+  root: text('root'), // set only when source_type='folder'
+  dir: text('dir'), // set only when source_type='folder'
   minRating: integer('min_rating'),
-  sizeLimit: text('size_limit').notNull(), // 'medium' | 'full'
-  includeRaws: integer('include_raws').notNull().default(0), // 0 | 1
-  passwordHash: text('password_hash'), // Bun.password argon2id PHC string
   expiresAt: text('expires_at'), // ISO 8601, nullable
-  note: text('note'),
+  note: text('note'), // markdown
   createdAt: text('created_at').notNull(),
 })
 
+// ── share_images ───────────────────────────────────────────────────────────
+// Explicit image membership for a `source_type='selection'` share, ordered by
+// `position` (design §7 rework). Cascades on either side deleting.
+export const shareImages = sqliteTable(
+  'share_images',
+  {
+    shareId: integer('share_id')
+      .notNull()
+      .references(() => shares.id, { onDelete: 'cascade' }),
+    imageId: integer('image_id')
+      .notNull()
+      .references(() => images.id, { onDelete: 'cascade' }),
+    position: integer('position').notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.shareId, t.imageId] }),
+    index('share_images_share_id_idx').on(t.shareId),
+  ],
+)
+
 // ── share_tokens ───────────────────────────────────────────────────────────
-// Rollable access tokens for a share (design §7). Revoking = setting revoked_at.
+// Rollable access tokens for a share (design §7). Each token carries a role
+// (view|download|full) governing which asset routes it can reach. Revoking =
+// setting revoked_at.
 export const shareTokens = sqliteTable('share_tokens', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   shareId: integer('share_id')
     .notNull()
     .references(() => shares.id),
   token: text('token').notNull().unique(),
+  role: text('role').notNull(), // 'view' | 'download' | 'full'
+  label: text('label'),
   createdAt: text('created_at').notNull(),
   revokedAt: text('revoked_at'),
 })
@@ -82,4 +108,5 @@ export type ImageRow = typeof images.$inferSelect
 export type NewImageRow = typeof images.$inferInsert
 export type B2ObjectRow = typeof b2Objects.$inferSelect
 export type ShareRow = typeof shares.$inferSelect
+export type ShareImageRow = typeof shareImages.$inferSelect
 export type ShareTokenRow = typeof shareTokens.$inferSelect

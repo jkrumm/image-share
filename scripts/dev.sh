@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Create the local data roots the env defaults point at.
-mkdir -p .dev/library .dev/raws .dev/uploads .dev/b2-mirror .dev/data/db .dev/data/renditions .dev/backup
+mkdir -p .dev/fuji .dev/raws .dev/share .dev/b2-mirror .dev/data/db .dev/data/renditions .dev/backup
 
 # Free the ports so re-runs don't leave a zombie / trip --strictPort.
 npx --yes kill-port 7720 7721 >/dev/null 2>&1 || true

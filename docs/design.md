@@ -53,17 +53,26 @@ bunfig.toml: `[install] minimumReleaseAgeExcludes = ["basalt-ui"]` (argo copy).
 
 ## 3. Filesystem contract (container paths; host mapping in §11)
 
+Three explicit roots (stage 1 rework — replaces the old LIBRARY_ROOT-with-denylist model):
+
+| root value | Env var | Container path | Mode | Content |
+|-|-|-|-|-|
+| `fuji` | `FUJI_ROOT` | `/photos/fuji` | ro | the Fuji JPEG tree — NEVER written |
+| `raws` | `RAWS_ROOT` | `/photos/raws` | ro | flat Fuji `.RAF` tree |
+| `share` | `SHARE_ROOT` | `/photos/share` | rw | service-owned ingest area (`root='share'`) |
+
+Plus, not image roots:
+
 | Env var | Container path | Mode | Content |
 |-|-|-|-|
-| `LIBRARY_ROOT` | `/photos/library` | ro | existing tree (`Bilder/`) — NEVER written |
-| `RAWS_ROOT` | `/photos/raws` | ro | flat Fuji `.RAF` tree |
-| `UPLOADS_DIR` | `/photos/uploads` | rw | service-owned ingest area (`root='uploads'`) |
 | `B2_MIRROR_DIR` | `/photos/b2-mirror` | rw | reverse-backup target of B2 `img/` |
 | `DATA_DIR` | `/data` | rw | `db/image-share.sqlite` + `renditions/` cache (rebuildable) |
 | `SNAPSHOT_DIR` | `/backup` | rw | nightly `VACUUM INTO` sqlite snapshot (restic-covered) |
 
-`INDEX_EXCLUDE_DIRS` (comma list, default `immich,Fotos-Mediathek.photoslibrary,Uploads,B2-Mirror`):
-top-level dirs under LIBRARY_ROOT skipped by the indexer. Hidden files/dirs (`.` prefix) always skipped.
+`lib/paths.ts` exports the single `rootBaseDir(root)` helper mapping a root value to its base
+dir — every route/module resolves through it rather than re-deriving the mapping. Hidden
+files/dirs (`.` prefix) are always skipped by the indexer; there is no longer a top-level
+exclude-dirs denylist (INDEX_EXCLUDE_DIRS is gone).
 
 **Path safety (hard rule, everywhere):** every file access resolves `join(root, relPath)` and
 asserts the resolved path starts with `root + sep` (lib/paths.ts `safeJoin(root, rel)`), throws 400 otherwise.
@@ -72,7 +81,7 @@ Image files are addressed by DB integer id in every route — raw paths never ap
 ## 4. DB schema (SQLite, drizzle; snake_case columns; WAL mode on open)
 
 ```ts
-images:      id int pk autoincrement; root text ('library'|'raws'|'uploads');
+images:      id int pk autoincrement; root text ('fuji'|'raws'|'share');
              rel_path text; dir text (posix dirname, '' at root); stem text; ext text (lower, no dot);
              kind text ('jpeg'|'raw'|'image'|'other'); file_size int; mtime_ms int;
              capture_at text? (ISO 8601); orientation int?; rating int?; width int?; height int?;
@@ -81,14 +90,21 @@ images:      id int pk autoincrement; root text ('library'|'raws'|'uploads');
 b2_objects:  key text pk (full key incl. 'img/' prefix); size int; last_modified text; etag text?;
              mirrored_at text?; published_image_id int? (fk images.id, null for out-of-band uploads);
              first_seen_at text
-shares:      id int pk; slug text unique (^[a-z0-9][a-z0-9-]{0,63}$); root text; dir text;
-             min_rating int?; size_limit text ('medium'|'full'); include_raws int (0/1);
-             password_hash text? (Bun.password argon2id PHC); expires_at text?; note text?; created_at text
-share_tokens: id int pk; share_id int fk; token text unique; created_at text; revoked_at text?
+shares:      id int pk; slug text unique (^[a-z0-9][a-z0-9-]{0,63}$); title text;
+             source_type text ('folder'|'selection'); root text? (set iff source_type='folder');
+             dir text? (set iff source_type='folder'); min_rating int?;
+             expires_at text?; note text? (markdown); created_at text
+share_images: share_id int fk→shares.id (cascade); image_id int fk→images.id (cascade);
+             position int; pk(share_id, image_id); idx(share_id)
+             — only populated when a share's source_type='selection'
+share_tokens: id int pk; share_id int fk; token text unique;
+             role text ('view'|'download'|'full'); label text?; created_at text; revoked_at text?
 ```
 
-The DB is a cache EXCEPT `shares`/`share_tokens` (not rebuildable) — hence the nightly snapshot cron.
-Rebuild = delete file, boot, re-index, restore shares from snapshot if needed.
+The DB is a cache EXCEPT `shares`/`share_images`/`share_tokens` (not rebuildable) — hence the
+nightly snapshot cron. Rebuild = delete file, boot, re-index, restore shares from snapshot if needed
+(a selection share's `share_images` rows reference `images.id`, which is only stable across a
+rebuild if the filesystem hasn't changed in the meantime — a known limitation of the cache model).
 
 ## 5. Indexer (`indexer/`)
 
@@ -117,34 +133,42 @@ then oldest-first until under `RENDITION_CACHE_MAX_GB` (default 20).
 
 ## 7. Shares — the public surface (`share/`)
 
-Auth model (no cookies): query `token` must match a non-revoked `share_tokens` row of a
-non-expired share. If `password_hash` set, additionally query `k` must equal
-`hmacSha256Hex(password_hash, token).slice(0,32)` (timing-safe compare). Wrong/rolled/expired/missing
-→ single clean 404 HTML page ("This share does not exist or has been revoked") — never distinguish cases.
-Unlock: password form POSTs to `/s/:slug/unlock` (body `password`, query `token`); on
-`Bun.password.verify` success → 302 to `/s/:slug?token=…&k=…`; failure re-renders form with error.
+Auth model (no cookies, no passwords — role-based rework, stage 1): query `token` must match a
+non-revoked `share_tokens` row of a non-expired share; the matched token's `role`
+(`view`|`download`|`full`) governs which sizes/routes it can reach (table below). Wrong/rolled/
+expired/missing token, unknown slug, an id outside the share, or a size/route the role doesn't
+permit → single opaque 404 HTML page ("This share does not exist or has been revoked") — never
+distinguish cases. There is no unlock flow; a request to `/s/:slug/unlock` 404s like everything else.
 
-Share content = images where `root=share.root AND (dir = share.dir OR dir LIKE share.dir || '/%')
-AND kind='jpeg' AND (min_rating IS NULL OR rating >= min_rating)`, sorted by capture_at.
+| role | `/s/:slug/img/:id` sizes | `/s/:slug/file/:id` | `?raw=1` | `/s/:slug/zip` |
+|-|-|-|-|-|
+| `view` | `thumb`, `med` | 404 | 404 | 404 |
+| `download` | `thumb`, `med`, `full` | original JPEG bytes | 404 | original JPEGs |
+| `full` | `thumb`, `med`, `full` | original JPEG bytes | paired RAF | original JPEGs + RAFs |
+
+Share content depends on `source_type`:
+- `folder`: images where `root=share.root AND (dir = share.dir OR dir LIKE share.dir || '/%')
+  AND kind='jpeg' AND (min_rating IS NULL OR rating >= min_rating)`, sorted by capture_at.
+- `selection`: images joined through `share_images` on `share_id`, ordered by `position`.
 
 Routes (all under `/s`, public):
 - `GET /s/:slug` — server-rendered HTML: responsive CSS grid (`<img loading="lazy">`, srcset thumb/med),
-  `<dialog>` lightbox (prev/next/keyboard/swipe, uses `med`; `full` when size_limit='full'),
-  header with count + date range + "Download all (.zip)" button (+ per-image download link in lightbox;
-  RAW download links when include_raws). ALL CSS+JS inline, zero external requests; dark, minimal,
-  styled with basalt tokens via `buildPaletteCss()` from `basalt-ui/tokens` (Mantine-free import). Mobile-first.
+  `<dialog>` lightbox (prev/next/keyboard/swipe, uses `med`; `full` for download/full-role tokens),
+  header with `share.title` + count + date range + "Download all (.zip)" (download/full roles only) +
+  `share.note` rendered as plain text below the heading. Per-image download link in the lightbox
+  (download/full roles), RAW download link (full role only). ALL CSS+JS inline, zero external
+  requests; dark, minimal. Mobile-first. STAGE 3 rewrites this page's design — the stage 1 version is
+  a minimal adaptation, not a design investment.
 - `GET /s/:slug/img/:id?size=thumb|med|full` — rendition bytes, `Cache-Control: private, max-age=31536000, immutable`.
-  `full` only when share.size_limit='full'; id must belong to the share (verify via share query) else 404.
-- `GET /s/:slug/file/:id?raw=1` — attachment download. size_limit='full' → original JPEG bytes
-  (`raw=1` → paired RAF, only when include_raws=1). size_limit='medium' → `full`-denied, streams `med`
-  rendition as attachment.
-- `GET /s/:slug/zip` — `makeZip` (client-zip) over an async generator: full → original files
-  (+ RAFs when include_raws), with `predictLength` → Content-Length; medium → med renditions
-  (generated lazily inside the generator, no Content-Length). Filename `<slug>.zip`.
+  Size must be permitted for the token's role (table above); id must belong to the share else 404.
+- `GET /s/:slug/file/:id?raw=1` — attachment download of the original JPEG (download/full roles only;
+  `raw=1` → paired RAF, full role only). view-role tokens 404 entirely.
+- `GET /s/:slug/zip` — `makeZip` (client-zip) over a generator: original files (+ RAFs for full-role
+  tokens) with `predictLength` → Content-Length. view-role tokens 404. Filename `<slug>.zip`.
   KNOWN CAVEAT (document in code + README): Bun.serve ReadableStream responses may ignore TCP
   backpressure (oven-sh/bun#32469) — acceptable single-user risk, re-check at upgrade time.
 
-`token` and `k` are threaded into every asset URL by the page renderer.
+`token` is threaded into every asset URL by the page renderer.
 
 ## 8. Admin API (`routes/`, bearer `API_SECRET` via argo's onTransform scoped guard)
 
@@ -155,19 +179,24 @@ for numeric params, `z.enum` never literal-unions, ISO date strings, `detail` wi
 + `security: [{ BearerAuth: [] }]`, `.get('', …)` at prefix root, `{ data, total }` pagination (limit ≤ 200).
 
 - `GET /api/library/dirs` → `{ data: [{ root, dir, imageCount, ratedCounts: {r4plus…}, rawPairedCount, minCaptureAt, maxCaptureAt }] }`
+  (root ∈ `fuji`|`raws`|`share`)
 - `GET /api/library/images?root&dir&recursive&minRating&page&limit&sort=captureAt|name&order` → `{ data: ImageDto[], total }`
 - `GET /api/library/images/:id/file?size=thumb|med|full|orig` — bytes. Accepts bearer header OR
   `?access_token=<API_SECRET>` (browser `<img>` tags; this route only).
 - `POST /api/index/rescan` → 202 `{ started }` · `GET /api/index/status`
-- `GET /api/shares` (each with tokens + minted URLs `SHARE_BASE_URL/<slug>?token=…`) ·
-  `POST /api/shares` `{ slug, root, dir, minRating?, sizeLimit, includeRaws, password?, expiresAt?, note? }`
-  (hashes password, creates first token) · `PATCH /api/shares/:id` (same fields; password: string sets,
-  null clears) · `DELETE /api/shares/:id` · `POST /api/shares/:id/roll` → revokes active tokens, mints new
-  → `{ token, url }` · `POST /api/shares/:id/tokens` (additional token without revoking, for the
-  "same folder, second recipient" case) — wait, per-recipient variants are separate shares; extra-token
-  route is for parallel links to the SAME share. Keep both roll + add.
-- `POST /api/images` multipart `{ file, dir? }` → saves to `UPLOADS_DIR/<yyyy>/<mm>/` (collision-safe name),
-  indexes immediately → 201 `{ id, root, relPath, adminFileUrl }`
+- Shares (role-based rework, stage 1): `GET /api/shares` (each with tokens `{id, role, label, url,
+  createdAt, revokedAt}` + `imageCount` + minted URLs `SHARE_BASE_URL/<slug>?token=…`) ·
+  `POST /api/shares { slug?, title, note?, expiresAt?, source: {type:'folder', root, dir, minRating?} |
+  {type:'selection', imageIds} }` — `slug` auto-derives from `title` (lowercased, non-alphanumerics →
+  `-`, collapsed/trimmed, `-2`/`-3`… on collision) when omitted; mints one initial token, role=`view` ·
+  `PATCH /api/shares/:id { title?, note?, expiresAt?, minRating?, imageIds? }` (imageIds replaces a
+  selection share's set, position = array order; rejected on a folder share) · `DELETE /api/shares/:id` ·
+  `POST /api/shares/:id/roll` → revokes every active token, mints a same-role replacement for each →
+  `{ tokens: TokenDto[] }` · `POST /api/shares/:id/tokens { role, label? }` → mints an additional
+  non-revoking token → `TokenDto` · `POST /api/shares/:id/tokens/:tokenId/revoke` → revokes exactly
+  that token → `TokenDto`.
+- `POST /api/images` multipart `{ file, dir? }` → saves to `SHARE_ROOT/<yyyy>/<mm>/` (collision-safe name),
+  indexes immediately (`root='share'`) → 201 `{ id, root, relPath, adminFileUrl }`
 - `POST /api/publish` `{ imageIds: number[], prefix: 'fuji'|'blog'|'gen'|'misc' }` → for each: Bun.S3Client
   `.write('img/<prefix>/<filename>', file)` (skip+report if key exists), upsert b2_objects with
   published_image_id → `{ published: [{ id, key, cdnUrl }] }` where cdnUrl = `CDN_BASE/<key minus img/>`.
@@ -175,7 +204,7 @@ for numeric params, `z.enum` never literal-unions, ISO date strings, `detail` wi
 - `POST /api/b2/reconcile` → 202 (S3 list `img/` → upsert/remove b2_objects rows)
 - `POST /api/backup/reverse-run` → 202 (download b2_objects lacking `mirrored_at` OR changed etag into
   `B2_MIRROR_DIR/<key minus img/>`, set mirrored_at; then GET `UPTIME_KUMA_PUSH_URL` if set — via tracedFetch)
-- `GET /api/stats` → `{ images, jpegs, raws, uploads, shares, activeTokens, b2Objects, b2Unmirrored, renditionCacheBytes, dbSizeBytes, lastIndexAt, version }`
+- `GET /api/stats` → `{ images, jpegs, raws, share, shares, activeTokens, b2Objects, b2Unmirrored, renditionCacheBytes, dbSizeBytes, lastIndexAt, version }`
 
 ## 9. Crons (croner, each tick in fresh root span per argo's cron pattern; `CRON_ENABLED` env, default true)
 

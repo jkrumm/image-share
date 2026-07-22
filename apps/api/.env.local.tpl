@@ -13,13 +13,12 @@ PORT=7720
 API_SECRET=dev-secret-change-me
 
 # ── Filesystem roots (local .dev/ mirrors the prod container layout) ─────────
-LIBRARY_ROOT=./.dev/library
+FUJI_ROOT=./.dev/fuji
 RAWS_ROOT=./.dev/raws
-UPLOADS_DIR=./.dev/uploads
+SHARE_ROOT=./.dev/share
 B2_MIRROR_DIR=./.dev/b2-mirror
 DATA_DIR=./.dev/data
 SNAPSHOT_DIR=./.dev/backup
-INDEX_EXCLUDE_DIRS=immich,Fotos-Mediathek.photoslibrary,Uploads,B2-Mirror
 
 # ── Share + CDN ──────────────────────────────────────────────────────────────
 SHARE_BASE_URL=http://localhost:7720/s

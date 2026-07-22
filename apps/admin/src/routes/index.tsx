@@ -30,7 +30,7 @@ import { libraryQueries, type ImageDto, type LibraryRoot } from '../lib/queries/
 const LIMIT = 60
 
 const SearchSchema = z.object({
-  root: z.enum(['library', 'raws', 'uploads']).optional(),
+  root: z.enum(['fuji', 'raws', 'share']).optional(),
   dir: z.string().optional(),
   recursive: z.boolean().default(false),
   minRating: z.number().int().min(0).max(5).optional(),
@@ -150,9 +150,10 @@ function LibraryPage() {
             </Paper>
           )}
 
-          {/* RAWs can't back a share — every raws row is kind='raw' and the share
-              content query requires kind='jpeg', so the link would be dead on
-              arrival. RAW downloads ride along on a library share via includeRaws. */}
+          {/* RAWs can't back a folder share — every raws row is kind='raw' and the
+              share content query requires kind='jpeg', so the link would be dead
+              on arrival. RAW downloads ride along on a fuji/share folder share
+              via a full-role token instead. */}
           {search.dir !== undefined && search.root !== 'raws' && (
             <Group justify="flex-end">
               <Button size="xs" variant="light" onClick={() => setShareFromFolderOpened(true)}>

@@ -20,9 +20,9 @@ import { getIndexStatus, indexSinglePath, runScan, setScanDb, setScanRoots } fro
 // to reliably win, so scan.ts exposes these setters instead (mirrors
 // lib/share-auth.ts's setShareDb / lib/s3.ts's setS3).
 const testRoot = mkdtempSync(join(tmpdir(), 'image-share-indexer-'))
-const libraryRoot = join(testRoot, 'library')
+const fujiRoot = join(testRoot, 'fuji')
 const rawsRoot = join(testRoot, 'raws')
-const uploadsDir = join(testRoot, 'uploads')
+const shareDir = join(testRoot, 'share')
 
 let testDb: Db
 
@@ -32,15 +32,14 @@ beforeAll(async () => {
   runMigrations(testDb)
   setScanDb(testDb)
   setScanRoots({
-    library: libraryRoot,
+    fuji: fujiRoot,
     raws: rawsRoot,
-    uploads: uploadsDir,
-    excludeDirs: 'excluded-dir',
+    share: shareDir,
   })
 
-  await mkdir(libraryRoot, { recursive: true })
+  await mkdir(fujiRoot, { recursive: true })
   await mkdir(rawsRoot, { recursive: true })
-  await mkdir(uploadsDir, { recursive: true })
+  await mkdir(shareDir, { recursive: true })
 })
 
 afterAll(async () => {
@@ -93,25 +92,23 @@ async function rowFor(root: string, relPath: string) {
 }
 
 describe('indexer scan', () => {
-  it('indexes a tree: JPEG (rated, dated) + paired RAF + excluded dir + uploads', async () => {
-    await writeJpegFixture(join(libraryRoot, 'mallorca-2026/DSCF0001.JPG'), {
+  it('indexes a tree: JPEG (rated, dated) + paired RAF + share upload', async () => {
+    await writeJpegFixture(join(fujiRoot, 'mallorca-2026/DSCF0001.JPG'), {
       rating: 4,
       captureAt: '2026:03:15 10:20:30',
       orientation: 6,
     })
     await writeRafFixture(join(rawsRoot, 'DSCF0001.RAF'))
-    // Excluded top-level dir under LIBRARY_ROOT (design §3) — must never be scanned.
-    await writeJpegFixture(join(libraryRoot, 'excluded-dir/skip.jpg'))
-    await writeJpegFixture(join(uploadsDir, '2026/07/upload.jpg'))
+    await writeJpegFixture(join(shareDir, '2026/07/upload.jpg'))
 
     const counts = await runScan()
 
-    expect(counts.added).toBe(3) // library jpeg + raf + upload — excluded dir is not scanned
+    expect(counts.added).toBe(3) // fuji jpeg + raf + share upload
     expect(counts.updated).toBe(0)
     expect(counts.removed).toBe(0)
     expect(counts.scanned).toBe(3)
 
-    const jpegRow = await rowFor('library', 'mallorca-2026/DSCF0001.JPG')
+    const jpegRow = await rowFor('fuji', 'mallorca-2026/DSCF0001.JPG')
     expect(jpegRow).not.toBeNull()
     expect(jpegRow?.dir).toBe('mallorca-2026')
     expect(jpegRow?.stem).toBe('DSCF0001')
@@ -124,7 +121,7 @@ describe('indexer scan', () => {
     // exifr treats the naive EXIF datetime as local wall-clock time, so the
     // expected ISO string is computed the same way (TZ-agnostic assertion).
     expect(jpegRow?.captureAt).toBe(new Date(2026, 2, 15, 10, 20, 30).toISOString())
-    // RAW pairing (design §5): library jpeg stem matches a raws row stem.
+    // RAW pairing (design §5): fuji jpeg stem matches a raws row stem.
     expect(jpegRow?.rawPath).toBe('DSCF0001.RAF')
 
     const rawRow = await rowFor('raws', 'DSCF0001.RAF')
@@ -132,10 +129,7 @@ describe('indexer scan', () => {
     expect(rawRow?.kind).toBe('raw')
     expect(rawRow?.ext).toBe('raf')
 
-    const excludedRow = await rowFor('library', 'excluded-dir/skip.jpg')
-    expect(excludedRow).toBeNull()
-
-    const uploadRow = await rowFor('uploads', '2026/07/upload.jpg')
+    const uploadRow = await rowFor('share', '2026/07/upload.jpg')
     expect(uploadRow).not.toBeNull()
 
     const finalStatus = getIndexStatus()
@@ -205,7 +199,7 @@ describe('indexer scan', () => {
     const rawRow = await rowFor('raws', 'DSCF0001.RAF')
     expect(rawRow).toBeNull()
 
-    const jpegRow = await rowFor('library', 'mallorca-2026/DSCF0001.JPG')
+    const jpegRow = await rowFor('fuji', 'mallorca-2026/DSCF0001.JPG')
     expect(jpegRow?.rawPath).toBeNull()
   })
 
@@ -215,10 +209,10 @@ describe('indexer scan', () => {
     // with ON DELETE NO ACTION and foreign_keys=ON — deleting the still-referenced
     // image would throw 'FOREIGN KEY constraint failed' and abort the whole scan.
     const rel = 'published/DSCF9000.JPG'
-    const abs = join(libraryRoot, rel)
+    const abs = join(fujiRoot, rel)
     await writeJpegFixture(abs)
     await runScan()
-    const published = await rowFor('library', rel)
+    const published = await rowFor('fuji', rel)
     expect(published).not.toBeNull()
 
     await testDb.insert(b2Objects).values({
@@ -236,7 +230,7 @@ describe('indexer scan', () => {
     const counts = await runScan()
     expect(counts.removed).toBeGreaterThanOrEqual(1)
     expect(getIndexStatus().lastError).toBeNull()
-    expect(await rowFor('library', rel)).toBeNull()
+    expect(await rowFor('fuji', rel)).toBeNull()
 
     // The mirror row survives as an out-of-band object with the link nulled.
     const b2Row = await testDb
@@ -249,11 +243,11 @@ describe('indexer scan', () => {
 
   it('falls back to the filename date pattern when no EXIF/XMP capture date exists', async () => {
     const name = '2025-11-02_08-15-00_hike.jpg'
-    await writeJpegFixture(join(libraryRoot, name)) // no captureAt/rating
+    await writeJpegFixture(join(fujiRoot, name)) // no captureAt/rating
 
     await runScan()
 
-    const row = await rowFor('library', name)
+    const row = await rowFor('fuji', name)
     expect(row?.captureAt).toBe(parseFilenameDate(name))
   })
 })
@@ -261,29 +255,27 @@ describe('indexer scan', () => {
 describe('indexSinglePath', () => {
   it('indexes an uploaded file and returns its id; re-indexing upserts the same row', async () => {
     const relPath = '2026/07/ingested.jpg'
-    await writeJpegFixture(join(uploadsDir, relPath), { rating: 5 })
+    await writeJpegFixture(join(shareDir, relPath), { rating: 5 })
 
-    const id = await indexSinglePath({ root: 'uploads', relPath })
+    const id = await indexSinglePath({ root: 'share', relPath })
     expect(typeof id).toBe('number')
 
-    let row = await rowFor('uploads', relPath)
+    let row = await rowFor('share', relPath)
     expect(row?.id).toBe(id)
     expect(row?.rating).toBe(5)
     expect(row?.dir).toBe('2026/07')
 
     // Re-uploading the same relPath (e.g. a re-ingest) upserts rather than
     // duplicating the (root, rel_path) unique row.
-    await writeJpegFixture(join(uploadsDir, relPath), { rating: 1 })
-    const secondId = await indexSinglePath({ root: 'uploads', relPath })
+    await writeJpegFixture(join(shareDir, relPath), { rating: 1 })
+    const secondId = await indexSinglePath({ root: 'share', relPath })
     expect(secondId).toBe(id)
 
-    row = await rowFor('uploads', relPath)
+    row = await rowFor('share', relPath)
     expect(row?.rating).toBe(1)
   })
 
-  it('rejects a relPath that escapes UPLOADS_DIR', async () => {
-    await expect(
-      indexSinglePath({ root: 'uploads', relPath: '../../etc/passwd' }),
-    ).rejects.toThrow()
+  it('rejects a relPath that escapes SHARE_ROOT', async () => {
+    await expect(indexSinglePath({ root: 'share', relPath: '../../etc/passwd' })).rejects.toThrow()
   })
 })

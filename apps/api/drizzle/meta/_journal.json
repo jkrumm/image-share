@@ -8,6 +8,13 @@
       "when": 1784651653211,
       "tag": "0000_icy_black_crow",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1784699851176,
+      "tag": "0001_glorious_ironclad",
+      "breakpoints": true
     }
   ]
 }

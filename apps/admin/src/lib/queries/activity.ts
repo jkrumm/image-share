@@ -6,7 +6,7 @@ export type StatsDto = {
   images: number
   jpegs: number
   raws: number
-  uploads: number
+  share: number
   shares: number
   activeTokens: number
   b2Objects: number

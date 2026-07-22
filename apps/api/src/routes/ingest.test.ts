@@ -27,12 +27,12 @@ const { ingestRoutes } = await import('./ingest.js')
 
 interface IngestResponse {
   id: number
-  root: 'uploads'
+  root: 'share'
   relPath: string
   adminFileUrl: string
 }
 
-// The ingest handler writes real bytes under UPLOADS_DIR (the local-dev sandbox
+// The ingest handler writes real bytes under SHARE_ROOT (the local-dev sandbox
 // under .dev/, never a real photo tree — design §3 / hard rule). Track every
 // yyyy/mm dir it creates so this test cleans up after itself.
 const createdDirs = new Set<string>()
@@ -42,10 +42,10 @@ afterAll(() => {
 })
 
 describe('POST /api/images (ingest)', () => {
-  it('writes the file to UPLOADS_DIR and indexes it, returning the 201 shape', async () => {
+  it('writes the file to SHARE_ROOT and indexes it, returning the 201 shape', async () => {
     const now = new Date()
     const yyyyMm = `${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, '0')}`
-    createdDirs.add(join(env.UPLOADS_DIR, String(now.getFullYear())))
+    createdDirs.add(join(env.SHARE_ROOT, String(now.getFullYear())))
 
     const app = new Elysia().use(ingestRoutes)
     const form = new FormData()
@@ -60,17 +60,17 @@ describe('POST /api/images (ingest)', () => {
     expect(res.status).toBe(201)
     const body = (await res.json()) as IngestResponse
 
-    expect(body.root).toBe('uploads')
+    expect(body.root).toBe('share')
     expect(typeof body.id).toBe('number')
     expect(body.relPath).toStartWith(`${yyyyMm}/`)
     expect(body.relPath).toEndWith('test-photo.jpg')
     expect(body.adminFileUrl).toBe(`/api/library/images/${body.id}/file`)
 
-    const written = Bun.file(join(env.UPLOADS_DIR, body.relPath))
+    const written = Bun.file(join(env.SHARE_ROOT, body.relPath))
     expect(await written.exists()).toBe(true)
 
     const [row] = await testDb.select().from(schema.images).where(eq(schema.images.id, body.id))
-    expect(row?.root).toBe('uploads')
+    expect(row?.root).toBe('share')
     expect(row?.relPath).toBe(body.relPath)
     expect(row?.kind).toBe('jpeg')
   })

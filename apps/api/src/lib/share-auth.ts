@@ -1,18 +1,24 @@
-import { createHmac, timingSafeEqual } from 'node:crypto'
 import { and, asc, eq, gte, isNull, or, sql } from 'drizzle-orm'
 import { db as defaultDb, type Db } from '../db/index.js'
-import { images, shares, shareTokens, type ImageRow, type ShareRow } from '../db/schema.js'
-import { env } from '../env.js'
+import {
+  images,
+  shareImages,
+  shares,
+  shareTokens,
+  type ImageRow,
+  type ShareRow,
+  type ShareTokenRow,
+} from '../db/schema.js'
 
-// Share access model (design §7). No cookies: a query `token` must match a
-// non-revoked token of a non-expired share. When the share is password
-// protected, the query `k` must additionally equal
-// `hmacSha256Hex(password_hash, token).slice(0, 32)` (timing-safe compared).
-// Every denial on the ASSET surface collapses to the same opaque 404 — the
-// caller never learns which check failed. The PAGE surface is the one exception:
-// a valid token on a password share renders the unlock form (the recipient
-// already holds the token; the password is a second factor), while an invalid
-// token still collapses to the opaque 404.
+// Share access model (design §7, role-based rework). No cookies: a query
+// `token` must match a non-revoked token of a non-expired share. The token
+// carries a role (view|download|full) that governs which asset routes/sizes
+// it can reach (enforced by share/routes.ts). Every denial on the public
+// surface collapses to the single opaque 404 — the caller never learns which
+// check failed (unknown slug, revoked/expired token, id outside the share, or
+// a size/role the token doesn't permit).
+
+export type ShareTokenRole = 'view' | 'download' | 'full'
 
 // ── DB injection (tests) ─────────────────────────────────────────────────────
 // Defaults to the process-wide singleton; unit tests inject an in-memory db.
@@ -23,59 +29,18 @@ export function setShareDb(database: Db): void {
   activeDb = database
 }
 
-// ── Capability derivation ────────────────────────────────────────────────────
-
-/**
- * Derive the `k` capability value threaded into asset URLs after a successful
- * unlock. Keyed on the stored password hash so rolling the password (or the
- * token) invalidates every previously-minted `k`. Pure — safe to unit test.
- */
-export function computeK(passwordHash: string, token: string): string {
-  return createHmac('sha256', passwordHash).update(token).digest('hex').slice(0, 32)
-}
-
-/**
- * Constant-time comparison of two hex strings of equal length. Returns false
- * (never throws) on any length mismatch or malformed input so it collapses into
- * the opaque-404 path.
- */
-export function timingSafeEqualHex(a: string, b: string): boolean {
-  if (a.length !== b.length) return false
-  try {
-    return timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'))
-  } catch {
-    return false
-  }
-}
-
-// ── Filesystem roots ─────────────────────────────────────────────────────────
-
-/** Absolute base directory for an image root (design §3). */
-export function rootBaseDir(root: string): string {
-  switch (root) {
-    case 'library':
-      return env.LIBRARY_ROOT
-    case 'raws':
-      return env.RAWS_ROOT
-    case 'uploads':
-      return env.UPLOADS_DIR
-    default:
-      throw new Error(`unknown image root: ${root}`)
-  }
-}
-
 // ── Share content query ──────────────────────────────────────────────────────
 
 /**
- * WHERE predicate for the images belonging to a share (design §7): same root,
- * dir at-or-below `share.dir`, kind='jpeg', rating >= min_rating. An empty
- * `share.dir` means the whole root (every dir). The `LIKE` wildcards in the
- * recursive branch are escaped so folder names containing `_`/`%` can't
- * over-match a sibling directory.
+ * WHERE predicate for a `source_type='folder'` share's images (design §7):
+ * same root, dir at-or-below `share.dir`, kind='jpeg', rating >= min_rating.
+ * An empty `share.dir` means the whole root (every dir). The `LIKE` wildcards
+ * in the recursive branch are escaped so folder names containing `_`/`%`
+ * can't over-match a sibling directory.
  */
-function shareImageFilter(share: ShareRow) {
-  const conds = [eq(images.root, share.root), eq(images.kind, 'jpeg')]
-  if (share.dir !== '') {
+function folderShareImageFilter(share: ShareRow) {
+  const conds = [eq(images.root, share.root as string), eq(images.kind, 'jpeg')]
+  if (share.dir) {
     const likePattern = share.dir.replace(/([\\%_])/g, '\\$1') + '/%'
     conds.push(or(eq(images.dir, share.dir), sql`${images.dir} LIKE ${likePattern} ESCAPE '\\'`)!)
   }
@@ -86,14 +51,24 @@ function shareImageFilter(share: ShareRow) {
 }
 
 /**
- * List the images belonging to a share, ordered by capture_at ascending (design
- * §7). `capture_at` may be null; SQLite sorts nulls first.
+ * List the images belonging to a share (design §7 rework): `source_type=
+ * 'folder'` uses the folder membership filter, sorted by capture_at ascending;
+ * `source_type='selection'` joins `share_images` and orders by `position`.
  */
-export function listShareImages(share: ShareRow): Promise<ImageRow[]> {
+export async function listShareImages(share: ShareRow): Promise<ImageRow[]> {
+  if (share.sourceType === 'selection') {
+    const rows = await activeDb
+      .select({ image: images })
+      .from(shareImages)
+      .innerJoin(images, eq(images.id, shareImages.imageId))
+      .where(eq(shareImages.shareId, share.id))
+      .orderBy(asc(shareImages.position))
+    return rows.map((r) => r.image)
+  }
   return activeDb
     .select()
     .from(images)
-    .where(shareImageFilter(share))
+    .where(folderShareImageFilter(share))
     .orderBy(asc(images.captureAt))
 }
 
@@ -103,28 +78,44 @@ export function listShareImages(share: ShareRow): Promise<ImageRow[]> {
  * the share resolves to null and the route 404s.
  */
 export async function getShareImageById(share: ShareRow, id: number): Promise<ImageRow | null> {
+  if (share.sourceType === 'selection') {
+    const rows = await activeDb
+      .select({ image: images })
+      .from(shareImages)
+      .innerJoin(images, eq(images.id, shareImages.imageId))
+      .where(and(eq(shareImages.shareId, share.id), eq(shareImages.imageId, id)))
+      .limit(1)
+    return rows[0]?.image ?? null
+  }
   const rows = await activeDb
     .select()
     .from(images)
-    .where(and(eq(images.id, id), shareImageFilter(share)))
+    .where(and(eq(images.id, id), folderShareImageFilter(share)))
     .limit(1)
   return rows[0] ?? null
 }
 
 // ── Token / access resolution ────────────────────────────────────────────────
 
+export interface ShareAccessQuery {
+  slug: string
+  token: string | undefined
+}
+
+export interface ResolvedShare {
+  share: ShareRow
+  token: string
+  role: ShareTokenRole
+}
+
 /**
- * Validate slug + token + expiry + revocation, ignoring any password. Returns
- * the share and echoed token, or null for ANY failure (unknown slug, expired
- * share, unknown/revoked token). This is the token-only gate shared by the page
- * and unlock flows; it never distinguishes cases.
+ * Validate slug + token + expiry + revocation and resolve the token's role.
+ * Returns null for ANY failure (unknown slug, expired share, unknown/revoked
+ * token) — every denial collapses to the single opaque 404 (design §7).
  */
-async function lookupValidToken(
-  slug: string,
-  token: string | undefined,
-): Promise<{ share: ShareRow; token: string } | null> {
-  if (!token) return null
-  const shareRows = await activeDb.select().from(shares).where(eq(shares.slug, slug)).limit(1)
+async function lookupValidToken(query: ShareAccessQuery): Promise<ResolvedShare | null> {
+  if (!query.token) return null
+  const shareRows = await activeDb.select().from(shares).where(eq(shares.slug, query.slug)).limit(1)
   const share = shareRows[0]
   if (!share) return null
   // Fail CLOSED on expiry: an unparseable `expires_at` (Date.parse → NaN) is
@@ -136,105 +127,62 @@ async function lookupValidToken(
   if (expiresAtMs !== null && (Number.isNaN(expiresAtMs) || expiresAtMs <= Date.now())) {
     return null
   }
-  const tokenRows = await activeDb
+  const tokenRows: ShareTokenRow[] = await activeDb
     .select()
     .from(shareTokens)
     .where(
       and(
-        eq(shareTokens.token, token),
+        eq(shareTokens.token, query.token),
         eq(shareTokens.shareId, share.id),
         isNull(shareTokens.revokedAt),
       ),
     )
     .limit(1)
-  if (!tokenRows[0]) return null
-  return { share, token }
-}
-
-export interface ShareAccessQuery {
-  slug: string
-  token: string | undefined
-  k: string | undefined
-}
-
-export interface ResolvedShare {
-  share: ShareRow
-  token: string
-  /** `k` to thread into asset URLs (empty for non-password shares). */
-  k: string
+  const tokenRow = tokenRows[0]
+  if (!tokenRow) return null
+  return { share, token: query.token, role: tokenRow.role as ShareTokenRole }
 }
 
 /**
- * Resolve a share access request for the ASSET surface (img/file/zip). Returns
- * null for ANY failure — including a valid token on a password share with a
- * missing/wrong `k` — so every asset denial collapses to the single opaque 404.
- * The `k` compare is timing-safe (design §7).
+ * Resolve a share access request — shared by the PAGE surface (GET /s/:slug)
+ * and the ASSET surface (img/file/zip). Returns null for ANY failure —
+ * unknown slug, expired share, unknown/revoked token — so every denial
+ * collapses to the single opaque 404. Role gating per route/size lives in
+ * share/routes.ts.
  */
-export async function resolveShareAccess(query: ShareAccessQuery): Promise<ResolvedShare | null> {
-  const valid = await lookupValidToken(query.slug, query.token)
-  if (!valid) return null
-  const { share, token } = valid
-  if (share.passwordHash) {
-    const expected = computeK(share.passwordHash, token)
-    if (!query.k || !timingSafeEqualHex(query.k, expected)) return null
-    return { share, token, k: expected }
+export function resolveShareAccess(query: ShareAccessQuery): Promise<ResolvedShare | null> {
+  return lookupValidToken(query)
+}
+
+/**
+ * Delete every `share_images` row for a share (used by PATCH's selection
+ * replace-the-set semantics before re-inserting the new ordered set).
+ */
+export async function clearShareImages(shareId: number): Promise<void> {
+  await activeDb.delete(shareImages).where(eq(shareImages.shareId, shareId))
+}
+
+/** Replace a selection share's image set, position = array order. */
+export async function setShareImages(shareId: number, imageIds: number[]): Promise<void> {
+  await clearShareImages(shareId)
+  if (imageIds.length === 0) return
+  await activeDb
+    .insert(shareImages)
+    .values(imageIds.map((imageId, position) => ({ shareId, imageId, position })))
+}
+
+/** Count of images in a share, for the admin list's `imageCount` (design §8). */
+export async function shareImageCount(share: ShareRow): Promise<number> {
+  if (share.sourceType === 'selection') {
+    const rows = await activeDb
+      .select({ imageId: shareImages.imageId })
+      .from(shareImages)
+      .where(eq(shareImages.shareId, share.id))
+    return rows.length
   }
-  return { share, token, k: '' }
-}
-
-export interface PageAccess extends ResolvedShare {
-  /** True when the token is valid but the password `k` is missing/wrong. */
-  needsUnlock: boolean
-}
-
-/**
- * Resolve the GET /s/:slug PAGE request. Three outcomes:
- * - null → opaque 404: invalid/revoked/expired token, unknown slug, OR a
- *   password share where a `k` WAS supplied but is wrong (tamper → never
- *   distinguished from a bad link).
- * - `needsUnlock: true` → the token is valid but no `k` was supplied yet on a
- *   password share: render the unlock form (the recipient holds the token; the
- *   password is a second factor).
- * - `needsUnlock: false` → gallery, with the `k` to thread into asset URLs.
- * The `k` compare is timing-safe (design §7).
- */
-export async function resolveShareForPage(query: ShareAccessQuery): Promise<PageAccess | null> {
-  const valid = await lookupValidToken(query.slug, query.token)
-  if (!valid) return null
-  const { share, token } = valid
-  if (share.passwordHash) {
-    // No `k` yet → offer the unlock form; a supplied-but-wrong `k` → opaque 404.
-    if (!query.k) return { share, token, k: '', needsUnlock: true }
-    const expected = computeK(share.passwordHash, token)
-    if (!timingSafeEqualHex(query.k, expected)) return null
-    return { share, token, k: expected, needsUnlock: false }
-  }
-  return { share, token, k: '', needsUnlock: false }
-}
-
-/**
- * Token-only resolution for the unlock POST. Validates slug + token + expiry +
- * revocation (never the password); the caller then verifies the submitted
- * password. Null → opaque 404.
- */
-export async function resolveShareToken(input: {
-  slug: string
-  token: string | undefined
-}): Promise<{ share: ShareRow; token: string } | null> {
-  return lookupValidToken(input.slug, input.token)
-}
-
-/**
- * Verify a share password on unlock. Returns the freshly-computed `k` on
- * success or null on failure (wrong password, or a share with no password set).
- */
-export async function verifySharePassword(input: {
-  share: ShareRow
-  token: string
-  password: string
-}): Promise<string | null> {
-  if (!input.share.passwordHash) return null
-  const ok = await Bun.password.verify(input.password, input.share.passwordHash)
-  if (!ok) return null
-  return computeK(input.share.passwordHash, input.token)
+  const rows = await activeDb
+    .select({ id: images.id })
+    .from(images)
+    .where(folderShareImageFilter(share))
+  return rows.length
 }

@@ -5,17 +5,11 @@ import { getS3 } from '../lib/s3.js'
 import { db } from '../db/index.js'
 import { images, b2Objects } from '../db/schema.js'
 import { env } from '../env.js'
-import { safeJoin } from '../lib/paths.js'
+import { rootBaseDir, safeJoin } from '../lib/paths.js'
 
-// Publish to the public CDN (design §8). Copies library images to B2 under
+// Publish to the public CDN (design §8). Copies images to B2 under
 // img/<prefix>/<filename>, skips-and-reports existing keys, upserts b2_objects
 // with published_image_id, and returns the img.jkrumm.com CDN URLs.
-
-const ROOT_PATH = {
-  library: env.LIBRARY_ROOT,
-  raws: env.RAWS_ROOT,
-  uploads: env.UPLOADS_DIR,
-} as const
 
 function cdnUrlForKey(key: string): string {
   const withoutPrefix = key.startsWith(env.B2_PREFIX) ? key.slice(env.B2_PREFIX.length) : key
@@ -44,8 +38,7 @@ export const publishRoutes = new Elysia({ name: 'publish' }).post(
         continue
       }
 
-      const rootPath = ROOT_PATH[row.root as keyof typeof ROOT_PATH]
-      const absPath = safeJoin(rootPath, row.relPath)
+      const absPath = safeJoin(rootBaseDir(row.root), row.relPath)
       const bytes = await Bun.file(absPath).bytes()
       await s3.put(key, bytes)
 

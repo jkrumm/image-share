@@ -2,25 +2,24 @@ import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ImageRow, ShareRow } from '../db/schema.js'
-import { rootBaseDir } from '../lib/share-auth.js'
+import { rootBaseDir } from '../lib/paths.js'
 import { buildShareZip } from './zip.js'
 
 // Unique temp subtree under the real (dev-default) roots so buildShareZip's
 // env-based path resolution finds the fixtures. Never touches real photo trees.
 const SUB = `ziptest-${process.pid}-${Date.now()}`
-const libBase = rootBaseDir('library')
+const fujiBase = rootBaseDir('fuji')
 const rawsBase = rootBaseDir('raws')
 
 function shareOf(over: Partial<ShareRow> = {}): ShareRow {
   return {
     id: 1,
     slug: 'trip',
-    root: 'library',
+    title: 'Trip',
+    sourceType: 'folder',
+    root: 'fuji',
     dir: SUB,
     minRating: null,
-    sizeLimit: 'full',
-    includeRaws: 0,
-    passwordHash: null,
     expiresAt: null,
     note: null,
     createdAt: '2026-01-01T00:00:00.000Z',
@@ -31,7 +30,7 @@ function shareOf(over: Partial<ShareRow> = {}): ShareRow {
 function imageOf(over: Partial<ImageRow> = {}): ImageRow {
   return {
     id: 10,
-    root: 'library',
+    root: 'fuji',
     relPath: `${SUB}/DSCF0001.JPG`,
     dir: SUB,
     stem: 'DSCF0001',
@@ -51,16 +50,16 @@ function imageOf(over: Partial<ImageRow> = {}): ImageRow {
 }
 
 beforeAll(() => {
-  mkdirSync(join(libBase, SUB), { recursive: true })
+  mkdirSync(join(fujiBase, SUB), { recursive: true })
   mkdirSync(join(rawsBase, SUB), { recursive: true })
   // Non-trivial JPEG-ish payloads (content is irrelevant to the zip container).
-  writeFileSync(join(libBase, SUB, 'DSCF0001.JPG'), Buffer.alloc(2048, 0x11))
-  writeFileSync(join(libBase, SUB, 'DSCF0002.JPG'), Buffer.alloc(3072, 0x22))
+  writeFileSync(join(fujiBase, SUB, 'DSCF0001.JPG'), Buffer.alloc(2048, 0x11))
+  writeFileSync(join(fujiBase, SUB, 'DSCF0002.JPG'), Buffer.alloc(3072, 0x22))
   writeFileSync(join(rawsBase, SUB, 'DSCF0001.RAF'), Buffer.alloc(4096, 0x33))
 })
 
 afterAll(() => {
-  rmSync(join(libBase, SUB), { recursive: true, force: true })
+  rmSync(join(fujiBase, SUB), { recursive: true, force: true })
   rmSync(join(rawsBase, SUB), { recursive: true, force: true })
 })
 
@@ -75,17 +74,17 @@ function asLatin1(buf: Uint8Array): string {
   return s
 }
 
-describe('buildShareZip (full share)', () => {
+describe('buildShareZip (download/full roles)', () => {
   it('streams a valid non-trivial zip with a local-file-header signature', async () => {
     const share = shareOf()
     const images = [
       imageOf({ id: 10 }),
       imageOf({ id: 11, relPath: `${SUB}/DSCF0002.JPG`, stem: 'DSCF0002' }),
     ]
-    const res = buildShareZip({ share, images })
+    const res = buildShareZip({ share, images, role: 'download' })
     expect(res.headers.get('content-type')).toBe('application/zip')
     expect(res.headers.get('content-disposition')).toContain('trip.zip')
-    // Full shares predict length → a Content-Length is set.
+    // Content-Length is predicted up front (files on disk, sizes known).
     expect(Number(res.headers.get('content-length'))).toBeGreaterThan(0)
 
     const buf = await bytesOf(res)
@@ -101,18 +100,18 @@ describe('buildShareZip (full share)', () => {
     expect(buf.length).toBe(Number(res.headers.get('content-length')))
   })
 
-  it('includes the paired RAF only when include_raws is enabled', async () => {
+  it('includes the paired RAF only for a full-role token', async () => {
     const image = imageOf({ id: 10, rawPath: `${SUB}/DSCF0001.RAF` })
 
-    const without = await bytesOf(
-      buildShareZip({ share: shareOf({ includeRaws: 0 }), images: [image] }),
+    const withoutRaw = await bytesOf(
+      buildShareZip({ share: shareOf(), images: [image], role: 'download' }),
     )
-    expect(asLatin1(without)).not.toContain('DSCF0001.RAF')
+    expect(asLatin1(withoutRaw)).not.toContain('DSCF0001.RAF')
 
     const withRaw = await bytesOf(
-      buildShareZip({ share: shareOf({ includeRaws: 1 }), images: [image] }),
+      buildShareZip({ share: shareOf(), images: [image], role: 'full' }),
     )
     expect(asLatin1(withRaw)).toContain('DSCF0001.RAF')
-    expect(withRaw.length).toBeGreaterThan(without.length)
+    expect(withRaw.length).toBeGreaterThan(withoutRaw.length)
   })
 })

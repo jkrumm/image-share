@@ -2,7 +2,7 @@ import { queryOptions, useMutation, useQueryClient } from '@tanstack/react-query
 import { unwrap } from 'basalt-ui/query'
 import { client } from '../eden'
 
-export type LibraryRoot = 'library' | 'raws' | 'uploads'
+export type LibraryRoot = 'fuji' | 'raws' | 'share'
 export type ImageKind = 'jpeg' | 'raw' | 'image' | 'other'
 
 export type ImageDto = {

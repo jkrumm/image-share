@@ -2,15 +2,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { createDb, db as defaultDb, runMigrations, type Db } from '../db/index.js'
 import { images, shares, shareTokens } from '../db/schema.js'
 import {
-  computeK,
   getShareImageById,
   listShareImages,
   resolveShareAccess,
-  resolveShareForPage,
-  resolveShareToken,
   setShareDb,
-  timingSafeEqualHex,
-  verifySharePassword,
+  setShareImages,
+  shareImageCount,
 } from './share-auth.js'
 
 let db: Db
@@ -20,10 +17,10 @@ async function seedShare(over: Partial<typeof shares.$inferInsert> = {}): Promis
     .insert(shares)
     .values({
       slug: 'mallorca-2026',
-      root: 'library',
+      title: 'Mallorca 2026',
+      sourceType: 'folder',
+      root: 'fuji',
       dir: 'mallorca-2026',
-      sizeLimit: 'medium',
-      includeRaws: 0,
       createdAt: '2026-01-01T00:00:00.000Z',
       ...over,
     })
@@ -31,12 +28,17 @@ async function seedShare(over: Partial<typeof shares.$inferInsert> = {}): Promis
   return row!.id
 }
 
-async function seedToken(shareId: number, token: string, revokedAt?: string): Promise<void> {
+async function seedToken(
+  shareId: number,
+  token: string,
+  over: Partial<typeof shareTokens.$inferInsert> = {},
+): Promise<void> {
   await db.insert(shareTokens).values({
     shareId,
     token,
+    role: 'view',
     createdAt: '2026-01-01T00:00:00.000Z',
-    revokedAt: revokedAt ?? null,
+    ...over,
   })
 }
 
@@ -44,7 +46,7 @@ async function seedImage(over: Partial<typeof images.$inferInsert>): Promise<num
   const [row] = await db
     .insert(images)
     .values({
-      root: 'library',
+      root: 'fuji',
       relPath: 'mallorca-2026/DSCF0001.JPG',
       dir: 'mallorca-2026',
       stem: 'DSCF0001',
@@ -70,51 +72,28 @@ afterAll(() => {
   setShareDb(defaultDb)
 })
 
-describe('computeK / timingSafeEqualHex', () => {
-  it('derives a stable 32-hex-char capability keyed on hash + token', () => {
-    const k = computeK('hash-a', 'token-1')
-    expect(k).toHaveLength(32)
-    expect(k).toMatch(/^[0-9a-f]{32}$/)
-    expect(computeK('hash-a', 'token-1')).toBe(k)
-    // Rolling the token (or the hash) mints a different k.
-    expect(computeK('hash-a', 'token-2')).not.toBe(k)
-    expect(computeK('hash-b', 'token-1')).not.toBe(k)
-  })
-
-  it('compares hex constant-time and rejects mismatched length/garbage', () => {
-    expect(timingSafeEqualHex('abcd', 'abcd')).toBe(true)
-    expect(timingSafeEqualHex('abcd', 'abce')).toBe(false)
-    expect(timingSafeEqualHex('abcd', 'ab')).toBe(false) // length mismatch
-    // Garbage of the same length as a real (valid-hex) capability fails: the
-    // valid side decodes to N bytes, the garbage to fewer → length-throw → false.
-    expect(timingSafeEqualHex('abcd', 'zzzz')).toBe(false)
-  })
-})
-
-describe('resolveShareAccess (asset surface)', () => {
-  it('accepts a valid token on a non-password share', async () => {
+describe('resolveShareAccess', () => {
+  it('accepts a valid token and resolves its role', async () => {
     const id = await seedShare({ slug: 'ok' })
-    await seedToken(id, 'good-token')
-    const access = await resolveShareAccess({ slug: 'ok', token: 'good-token', k: undefined })
+    await seedToken(id, 'good-token', { role: 'download' })
+    const access = await resolveShareAccess({ slug: 'ok', token: 'good-token' })
     expect(access?.share.id).toBe(id)
-    expect(access?.k).toBe('')
+    expect(access?.role).toBe('download')
   })
 
   it('returns null for unknown slug, missing/revoked token, and expired share', async () => {
     const id = await seedShare({ slug: 'checks' })
     await seedToken(id, 'live')
-    await seedToken(id, 'rolled', '2026-02-01T00:00:00.000Z')
+    await seedToken(id, 'rolled', { revokedAt: '2026-02-01T00:00:00.000Z' })
     const expiredId = await seedShare({ slug: 'expired', expiresAt: '2000-01-01T00:00:00.000Z' })
     await seedToken(expiredId, 'exp-token')
 
-    expect(await resolveShareAccess({ slug: 'nope', token: 'live', k: undefined })).toBeNull()
-    expect(await resolveShareAccess({ slug: 'checks', token: undefined, k: undefined })).toBeNull()
-    expect(await resolveShareAccess({ slug: 'checks', token: 'rolled', k: undefined })).toBeNull()
-    expect(
-      await resolveShareAccess({ slug: 'expired', token: 'exp-token', k: undefined }),
-    ).toBeNull()
+    expect(await resolveShareAccess({ slug: 'nope', token: 'live' })).toBeNull()
+    expect(await resolveShareAccess({ slug: 'checks', token: undefined })).toBeNull()
+    expect(await resolveShareAccess({ slug: 'checks', token: 'rolled' })).toBeNull()
+    expect(await resolveShareAccess({ slug: 'expired', token: 'exp-token' })).toBeNull()
     // A valid token cannot be replayed against a different share's slug.
-    expect(await resolveShareAccess({ slug: 'expired', token: 'live', k: undefined })).toBeNull()
+    expect(await resolveShareAccess({ slug: 'expired', token: 'live' })).toBeNull()
   })
 
   it('fails CLOSED on an unparseable expires_at (never exposes it as non-expiring)', async () => {
@@ -124,89 +103,23 @@ describe('resolveShareAccess (asset surface)', () => {
     // and keep the share public forever. The fail-closed gate treats it as expired.
     const badId = await seedShare({ slug: 'bad-expiry', expiresAt: 'not-a-date' })
     await seedToken(badId, 'bad-token')
-    expect(
-      await resolveShareAccess({ slug: 'bad-expiry', token: 'bad-token', k: undefined }),
-    ).toBeNull()
-    expect(
-      await resolveShareForPage({ slug: 'bad-expiry', token: 'bad-token', k: undefined }),
-    ).toBeNull()
-    expect(await resolveShareToken({ slug: 'bad-expiry', token: 'bad-token' })).toBeNull()
-  })
-
-  it('enforces the timing-safe k check for password shares', async () => {
-    const hash = await Bun.password.hash('hunter2')
-    const id = await seedShare({ slug: 'locked', passwordHash: hash })
-    await seedToken(id, 'ptoken')
-    const goodK = computeK(hash, 'ptoken')
-
-    expect(await resolveShareAccess({ slug: 'locked', token: 'ptoken', k: undefined })).toBeNull()
-    expect(await resolveShareAccess({ slug: 'locked', token: 'ptoken', k: 'deadbeef' })).toBeNull()
-    const ok = await resolveShareAccess({ slug: 'locked', token: 'ptoken', k: goodK })
-    expect(ok?.k).toBe(goodK)
+    expect(await resolveShareAccess({ slug: 'bad-expiry', token: 'bad-token' })).toBeNull()
   })
 })
 
-describe('resolveShareForPage (page surface)', () => {
-  it('offers the unlock form when k is absent but 404s on a wrong k', async () => {
-    const hash = await Bun.password.hash('pw')
-    const id = await seedShare({ slug: 'page-locked', passwordHash: hash })
-    await seedToken(id, 'pt')
-    const goodK = computeK(hash, 'pt')
-
-    const noK = await resolveShareForPage({ slug: 'page-locked', token: 'pt', k: undefined })
-    expect(noK?.needsUnlock).toBe(true)
-    // Wrong k → null (opaque 404), never distinguished from a bad link.
-    expect(await resolveShareForPage({ slug: 'page-locked', token: 'pt', k: 'ffff' })).toBeNull()
-    const okK = await resolveShareForPage({ slug: 'page-locked', token: 'pt', k: goodK })
-    expect(okK?.needsUnlock).toBe(false)
-    expect(okK?.k).toBe(goodK)
-  })
-
-  it('renders directly for non-password shares', async () => {
-    const id = await seedShare({ slug: 'page-open' })
-    await seedToken(id, 'pot')
-    const res = await resolveShareForPage({ slug: 'page-open', token: 'pot', k: undefined })
-    expect(res?.needsUnlock).toBe(false)
-  })
-})
-
-describe('verifySharePassword + resolveShareToken (unlock roundtrip)', () => {
-  it('verifies the password and mints a k that unlocks the asset surface', async () => {
-    const hash = await Bun.password.hash('correct horse')
-    const id = await seedShare({ slug: 'unlock-me', passwordHash: hash })
-    await seedToken(id, 'utoken')
-
-    const tokenOnly = await resolveShareToken({ slug: 'unlock-me', token: 'utoken' })
-    expect(tokenOnly?.share.id).toBe(id)
-
-    expect(
-      await verifySharePassword({ share: tokenOnly!.share, token: 'utoken', password: 'wrong' }),
-    ).toBeNull()
-    const k = await verifySharePassword({
-      share: tokenOnly!.share,
-      token: 'utoken',
-      password: 'correct horse',
-    })
-    expect(k).not.toBeNull()
-    // The minted k unlocks the gallery + assets.
-    const access = await resolveShareAccess({ slug: 'unlock-me', token: 'utoken', k: k! })
-    expect(access?.share.id).toBe(id)
-  })
-})
-
-describe('listShareImages + getShareImageById (content query)', () => {
+describe('listShareImages + getShareImageById (folder source)', () => {
   it('scopes to the share dir recursively, kind jpeg, and min rating', async () => {
     const id = await seedShare({ slug: 'content', dir: 'trip', minRating: 4 })
     await seedToken(id, 'ct')
     const inTop = await seedImage({
-      root: 'library',
+      root: 'fuji',
       relPath: 'trip/a.jpg',
       dir: 'trip',
       rating: 5,
       captureAt: '2026-06-01',
     })
     const inSub = await seedImage({
-      root: 'library',
+      root: 'fuji',
       relPath: 'trip/day1/b.jpg',
       dir: 'trip/day1',
       rating: 4,
@@ -214,14 +127,14 @@ describe('listShareImages + getShareImageById (content query)', () => {
     })
     // Excluded: low rating, wrong kind, sibling dir, other root.
     await seedImage({
-      root: 'library',
+      root: 'fuji',
       relPath: 'trip/c.jpg',
       dir: 'trip',
       rating: 2,
       captureAt: '2026-06-03',
     })
     await seedImage({
-      root: 'library',
+      root: 'fuji',
       relPath: 'trip/d.raf',
       dir: 'trip',
       kind: 'raw',
@@ -229,14 +142,15 @@ describe('listShareImages + getShareImageById (content query)', () => {
       captureAt: '2026-06-04',
     })
     const siblingId = await seedImage({
-      root: 'library',
+      root: 'fuji',
       relPath: 'trip-other/e.jpg',
       dir: 'trip-other',
       rating: 5,
       captureAt: '2026-06-05',
     })
 
-    const share = (await resolveShareToken({ slug: 'content', token: 'ct' }))!.share
+    const access = await resolveShareAccess({ slug: 'content', token: 'ct' })
+    const share = access!.share
     const list = await listShareImages(share)
     const ids = list.map((r) => r.id)
     expect(ids).toEqual([inTop, inSub]) // sorted by capture_at asc, filters applied
@@ -245,5 +159,36 @@ describe('listShareImages + getShareImageById (content query)', () => {
     // getShareImageById mirrors the same membership filter.
     expect((await getShareImageById(share, inSub))?.id).toBe(inSub)
     expect(await getShareImageById(share, siblingId)).toBeNull()
+    expect(await shareImageCount(share)).toBe(2)
+  })
+})
+
+describe('listShareImages + getShareImageById (selection source)', () => {
+  it('returns exactly the selected images, ordered by position', async () => {
+    const id = await seedShare({
+      slug: 'picks',
+      sourceType: 'selection',
+      root: null,
+      dir: null,
+    })
+    await seedToken(id, 'pt')
+    const a = await seedImage({ root: 'fuji', relPath: 'a.jpg', dir: '', rating: 1 })
+    const b = await seedImage({ root: 'fuji', relPath: 'b.jpg', dir: '', rating: 5 })
+    const notPicked = await seedImage({ root: 'fuji', relPath: 'c.jpg', dir: '', rating: 5 })
+
+    // Deliberately reversed order vs insertion, to prove position wins over id/rating.
+    await setShareImages(id, [b, a])
+
+    const access = await resolveShareAccess({ slug: 'picks', token: 'pt' })
+    const share = access!.share
+    const list = await listShareImages(share)
+    expect(list.map((r) => r.id)).toEqual([b, a])
+    expect(await getShareImageById(share, notPicked)).toBeNull()
+    expect(await shareImageCount(share)).toBe(2)
+
+    // Replacing the set drops anything not re-included.
+    await setShareImages(id, [a])
+    const after = await listShareImages(share)
+    expect(after.map((r) => r.id)).toEqual([a])
   })
 })

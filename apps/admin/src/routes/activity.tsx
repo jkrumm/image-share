@@ -66,7 +66,7 @@ function ActivityPage() {
           <StatCard label="Images" value={String(stats.images)} />
           <StatCard label="JPEGs" value={String(stats.jpegs)} />
           <StatCard label="RAWs" value={String(stats.raws)} />
-          <StatCard label="Uploads" value={String(stats.uploads)} />
+          <StatCard label="Share uploads" value={String(stats.share)} />
           <StatCard label="Shares" value={String(stats.shares)} />
           <StatCard label="Active tokens" value={String(stats.activeTokens)} />
           <StatCard label="B2 objects" value={String(stats.b2Objects)} />

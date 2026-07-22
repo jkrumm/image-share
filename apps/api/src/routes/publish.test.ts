@@ -31,7 +31,7 @@ interface PublishResponse {
   skipped: { id: number; key: string; reason: string }[]
 }
 
-const fixtureDir = join(env.UPLOADS_DIR, 'publish-fixtures')
+const fixtureDir = join(env.SHARE_ROOT, 'publish-fixtures')
 
 afterAll(() => {
   setS3(null)
@@ -43,7 +43,7 @@ async function seedImage(relPath: string): Promise<number> {
   const [row] = await testDb
     .insert(schema.images)
     .values({
-      root: 'uploads',
+      root: 'share',
       relPath,
       dir: 'publish-fixtures',
       stem: relPath

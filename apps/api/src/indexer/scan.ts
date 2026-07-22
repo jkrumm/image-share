@@ -1,6 +1,6 @@
-// Indexer scan (design §5). Walks LIBRARY_ROOT (minus excludes), RAWS_ROOT, and
-// UPLOADS_DIR; upserts image rows by (root, rel_path); prunes vanished files;
-// pairs library JPEGs to their RAF. Single-flight via a module-level flag.
+// Indexer scan (design §5). Walks FUJI_ROOT, RAWS_ROOT, and SHARE_ROOT;
+// upserts image rows by (root, rel_path); prunes vanished files; pairs fuji
+// JPEGs to their RAF. Single-flight via a module-level flag.
 
 import type { Dirent } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
@@ -22,11 +22,9 @@ export function setScanDb(database: Db): void {
 }
 
 export interface ScanRootsConfig {
-  library: string
+  fuji: string
   raws: string
-  uploads: string
-  /** Comma list, same shape as env.INDEX_EXCLUDE_DIRS. */
-  excludeDirs: string
+  share: string
 }
 
 // env.ts parses process.env exactly once at import time, so it can't be
@@ -43,10 +41,9 @@ export function setScanRoots(roots: ScanRootsConfig | null): void {
 function getRoots(): ScanRootsConfig {
   return (
     rootsOverride ?? {
-      library: env.LIBRARY_ROOT,
+      fuji: env.FUJI_ROOT,
       raws: env.RAWS_ROOT,
-      uploads: env.UPLOADS_DIR,
-      excludeDirs: env.INDEX_EXCLUDE_DIRS,
+      share: env.SHARE_ROOT,
     }
   )
 }
@@ -81,7 +78,7 @@ export function getIndexStatus(): IndexStatus {
   return { ...status }
 }
 
-type Root = 'library' | 'raws' | 'uploads'
+type Root = 'fuji' | 'raws' | 'share'
 
 // Extension → kind (design §5). Anything not listed here is skipped entirely
 // (never written to the DB) — includes `.xmp` sidecars and `.photo` files.
@@ -124,16 +121,10 @@ interface DirNode {
 /**
  * Recursively walk a directory tree, yielding one node per directory
  * (including the root) with its visible entries pre-filtered. Hidden
- * files/dirs (`.` prefix) are always skipped. `excludeTopLevel` names are
- * skipped only at depth 0 (design §3: top-level dirs under LIBRARY_ROOT).
- * A missing root directory yields nothing rather than throwing.
+ * files/dirs (`.` prefix) are always skipped. A missing root directory yields
+ * nothing rather than throwing.
  */
-async function* walkDirs(
-  rootAbs: string,
-  relDir: string,
-  depth: number,
-  excludeTopLevel: ReadonlySet<string>,
-): AsyncGenerator<DirNode> {
+async function* walkDirs(rootAbs: string, relDir: string): AsyncGenerator<DirNode> {
   let entries: Dirent[]
   try {
     entries = await readdir(join(rootAbs, relDir), { withFileTypes: true })
@@ -145,9 +136,8 @@ async function* walkDirs(
   yield { dirAbs: join(rootAbs, relDir), dirRel: relDir, entries: visible }
   for (const entry of visible) {
     if (!entry.isDirectory()) continue
-    if (depth === 0 && excludeTopLevel.has(entry.name)) continue
     const childRel = relDir ? `${relDir}/${entry.name}` : entry.name
-    yield* walkDirs(rootAbs, childRel, depth + 1, excludeTopLevel)
+    yield* walkDirs(rootAbs, childRel)
   }
 }
 
@@ -164,12 +154,9 @@ interface Candidate {
 
 /** Collect every recognized image file under `rootAbs`, pairing RAF sidecars
  * (`X.RAF` → `X.xmp` or `X.RAF.xmp`, same directory) along the way. */
-async function collectCandidates(
-  rootAbs: string,
-  excludeTopLevel: ReadonlySet<string>,
-): Promise<Candidate[]> {
+async function collectCandidates(rootAbs: string): Promise<Candidate[]> {
   const candidates: Candidate[] = []
-  for await (const node of walkDirs(rootAbs, '', 0, excludeTopLevel)) {
+  for await (const node of walkDirs(rootAbs, '')) {
     const files = node.entries.filter((e) => e.isFile())
     const byLowerName = new Map(files.map((f) => [f.name.toLowerCase(), f.name]))
 
@@ -212,13 +199,8 @@ async function collectCandidates(
 /** Reconcile one root against the DB: upsert changed/new files, skip
  * unchanged ones (no metadata re-read), and prune vanished ones. Mutates
  * `counts` in place so all three roots accumulate into one ScanCounts. */
-async function scanRoot(
-  root: Root,
-  rootAbs: string,
-  excludeTopLevel: ReadonlySet<string>,
-  counts: ScanCounts,
-): Promise<void> {
-  const candidates = await collectCandidates(rootAbs, excludeTopLevel)
+async function scanRoot(root: Root, rootAbs: string, counts: ScanCounts): Promise<void> {
+  const candidates = await collectCandidates(rootAbs)
 
   const existingRows = await activeDb.select().from(images).where(eq(images.root, root))
   const existingByRelPath = new Map(existingRows.map((row) => [row.relPath, row]))
@@ -295,7 +277,7 @@ async function scanRoot(
   }
 }
 
-/** Pair every `library` JPEG to its RAF by stem (design §5) — RAWS_ROOT is a
+/** Pair every `fuji` JPEG to its RAF by stem (design §5) — RAWS_ROOT is a
  * flat tree, so pairing ignores directory and matches on stem only. Clears
  * `raw_path` when a previously-paired RAF has vanished. */
 async function pairRawFiles(): Promise<void> {
@@ -311,7 +293,7 @@ async function pairRawFiles(): Promise<void> {
   const jpegRows = await activeDb
     .select({ id: images.id, stem: images.stem, rawPath: images.rawPath })
     .from(images)
-    .where(and(eq(images.root, 'library'), eq(images.kind, 'jpeg')))
+    .where(and(eq(images.root, 'fuji'), eq(images.kind, 'jpeg')))
 
   for (const row of jpegRows) {
     const pairedRawPath = rawPathByStem.get(row.stem) ?? null
@@ -319,15 +301,6 @@ async function pairRawFiles(): Promise<void> {
       await activeDb.update(images).set({ rawPath: pairedRawPath }).where(eq(images.id, row.id))
     }
   }
-}
-
-function parseExcludeDirs(excludeDirs: string): Set<string> {
-  return new Set(
-    excludeDirs
-      .split(',')
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0),
-  )
 }
 
 /**
@@ -348,10 +321,9 @@ export async function runScan(): Promise<ScanCounts> {
 
   try {
     const roots = getRoots()
-    const excludeTopLevel = parseExcludeDirs(roots.excludeDirs)
-    await scanRoot('library', roots.library, excludeTopLevel, counts)
-    await scanRoot('raws', roots.raws, new Set(), counts)
-    await scanRoot('uploads', roots.uploads, new Set(), counts)
+    await scanRoot('fuji', roots.fuji, counts)
+    await scanRoot('raws', roots.raws, counts)
+    await scanRoot('share', roots.share, counts)
     await pairRawFiles()
     status.lastCounts = counts
     status.lastFinishedAt = new Date().toISOString()
@@ -367,13 +339,10 @@ export async function runScan(): Promise<ScanCounts> {
 /**
  * Index (or re-index) a single file immediately after an upload and return its
  * image id — used by POST /api/images (design §8). `relPath` is validated
- * against UPLOADS_DIR via safeJoin (design §3 hard rule) before touching disk.
+ * against SHARE_ROOT via safeJoin (design §3 hard rule) before touching disk.
  */
-export async function indexSinglePath(input: {
-  root: 'uploads'
-  relPath: string
-}): Promise<number> {
-  const absPath = safeJoin(getRoots().uploads, input.relPath)
+export async function indexSinglePath(input: { root: 'share'; relPath: string }): Promise<number> {
+  const absPath = safeJoin(getRoots().share, input.relPath)
   const fileName = basename(input.relPath)
   const dotExt = extname(fileName)
   const ext = dotExt.slice(1).toLowerCase()
@@ -389,7 +358,7 @@ export async function indexSinglePath(input: {
   const metadata = await extractMetadata({ absPath, kind, mtimeMs })
 
   const values: NewImageRow = {
-    root: 'uploads',
+    root: 'share',
     relPath: input.relPath,
     dir,
     stem,

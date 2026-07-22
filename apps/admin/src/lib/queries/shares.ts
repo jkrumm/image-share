@@ -1,49 +1,58 @@
 import { queryOptions, useMutation, useQueryClient } from '@tanstack/react-query'
 import { unwrap } from 'basalt-ui/query'
 import { client } from '../eden'
-import type { LibraryRoot } from './library'
+
+export type TokenRole = 'view' | 'download' | 'full'
 
 export type TokenDto = {
   id: number
-  token: string
+  role: TokenRole
+  label: string | null
   createdAt: string
   revokedAt: string | null
   url: string
 }
 
+// Folder shares can only target roots that hold JPEG-kind rows; RAWS_ROOT is
+// rejected server-side (a raws share can never contain an image). Mirrors the
+// API's ShareRootEnum.
+export type ShareRoot = 'fuji' | 'share'
+
 export type ShareDto = {
   id: number
   slug: string
-  root: LibraryRoot
-  dir: string
+  title: string
+  sourceType: 'folder' | 'selection'
+  root: ShareRoot | null
+  dir: string | null
   minRating: number | null
-  sizeLimit: 'medium' | 'full'
-  includeRaws: boolean
-  hasPassword: boolean
   expiresAt: string | null
   note: string | null
   createdAt: string
+  imageCount: number
   tokens: TokenDto[]
 }
 
-// Shares can only target roots that hold JPEG-kind rows; RAWS_ROOT is rejected
-// server-side (a raws share can never contain an image). Mirrors the API's
-// CreateShareBody.root enum.
-export type ShareRoot = 'library' | 'uploads'
+export type ShareSourceInput =
+  | { type: 'folder'; root: ShareRoot; dir: string; minRating?: number | null }
+  | { type: 'selection'; imageIds: number[] }
 
 export type CreateShareInput = {
-  slug: string
-  root: ShareRoot
-  dir: string
-  minRating?: number | null
-  sizeLimit: 'medium' | 'full'
-  includeRaws: boolean
-  password?: string | null
-  expiresAt?: string | null
+  slug?: string
+  title: string
   note?: string | null
+  expiresAt?: string | null
+  source: ShareSourceInput
 }
 
-export type UpdateShareInput = Partial<CreateShareInput> & { id: number }
+export type UpdateShareInput = {
+  id: number
+  title?: string
+  note?: string | null
+  expiresAt?: string | null
+  minRating?: number | null
+  imageIds?: number[]
+}
 
 export const sharesQueries = {
   all: () => ['shares'] as const,
@@ -94,7 +103,22 @@ export function useRollShareToken() {
 export function useAddShareToken() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (id: number) => unwrap(client.api.shares({ id: String(id) }).tokens.post()),
+    mutationFn: ({ id, role, label }: { id: number; role: TokenRole; label?: string | null }) =>
+      unwrap(client.api.shares({ id: String(id) }).tokens.post({ role, label })),
+    onSuccess: () => invalidateShares(qc),
+  })
+}
+
+export function useRevokeShareToken() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, tokenId }: { id: number; tokenId: number }) =>
+      unwrap(
+        client.api
+          .shares({ id: String(id) })
+          .tokens({ tokenId: String(tokenId) })
+          .revoke.post(),
+      ),
     onSuccess: () => invalidateShares(qc),
   })
 }

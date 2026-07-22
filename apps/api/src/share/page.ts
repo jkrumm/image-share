@@ -1,24 +1,29 @@
 import { basename } from 'node:path'
 import type { ImageRow, ShareRow } from '../db/schema.js'
+import type { ShareTokenRole } from '../lib/share-auth.js'
 
-// Server-rendered share HTML (design §7). ALL CSS + JS is inline — zero external
-// requests. Dark, minimal, mobile-first. Every user-controlled string (note,
-// filenames, slug) is HTML-escaped; token/k/id are URL-encoded into asset URLs.
+// Server-rendered share HTML (design §7, role-based rework — see the Stage 3
+// note below; this is a MINIMAL adaptation, not a redesign). ALL CSS + JS is
+// inline — zero external requests. Dark, minimal, mobile-first. Every
+// user-controlled string (title, note, filenames, slug) is HTML-escaped;
+// token/id are URL-encoded into asset URLs.
+//
+// STAGE 3 NOTE: this file is scheduled for a full rewrite in stage 3 of the
+// share rework — the changes here are the minimum to compile against the new
+// role-based access model (source_type/title/note), not a design investment.
 //
 // NOTE ON STYLING: design §7 calls for basalt tokens via `buildPaletteCss()`
 // from `basalt-ui/tokens`, but `basalt-ui` is NOT a dependency of apps/api and
 // deps cannot be added here. Following the render404Page precedent, a small
 // hardcoded dark (zinc) palette is inlined instead — this keeps the page fully
-// self-contained (the load-bearing "zero external requests" requirement). See
-// the blockers note in the implementation report.
+// self-contained (the load-bearing "zero external requests" requirement).
 
 export interface SharePageInput {
   share: ShareRow
   images: ImageRow[]
   /** Threaded into every asset URL. */
   token: string
-  /** Threaded into asset URLs for password-protected shares ('' otherwise). */
-  k: string
+  role: ShareTokenRole
 }
 
 /** HTML-escape a string for use in text nodes and double-quoted attributes. */
@@ -34,11 +39,9 @@ function jsonForScript(value: unknown): string {
   return JSON.stringify(value).replace(/</g, '\\u003c')
 }
 
-/** Shared query suffix (`token=…&k=…`) threaded into every asset URL. */
-function authQuery(token: string, k: string): string {
-  const parts = [`token=${encodeURIComponent(token)}`]
-  if (k) parts.push(`k=${encodeURIComponent(k)}`)
-  return parts.join('&')
+/** Shared query suffix (`token=…`) threaded into every asset URL. */
+function authQuery(token: string): string {
+  return `token=${encodeURIComponent(token)}`
 }
 
 /** Human display name for an image (relative filename). */
@@ -71,16 +74,18 @@ const PALETTE = `
  * Render the full responsive gallery page: a CSS grid of lazy `<img>` with
  * thumb/med srcset and a `<dialog>` lightbox (prev/next/keyboard/swipe, med or
  * full), a header with count + date range + "Download all (.zip)", and per-image
- * (+ RAW when include_raws) download links inside the lightbox.
+ * (+ RAW for full-role tokens) download links inside the lightbox. Download/
+ * zip affordances are hidden entirely for view-role tokens.
  */
 export function renderSharePage(input: SharePageInput): string {
-  const { share, images, token, k } = input
+  const { share, images, token, role } = input
   const slugU = encodeURIComponent(share.slug)
-  const auth = authQuery(token, k)
-  const isFull = share.sizeLimit === 'full'
-  const withRaws = share.includeRaws === 1
+  const auth = authQuery(token)
+  const canDownload = role !== 'view'
+  const canRaw = role === 'full'
+  const isFull = role !== 'view' // full-size rendition permitted in the lightbox
 
-  const title = share.note ? share.note : 'Shared photos'
+  const title = share.title
   const captureDates = images
     .map((i) => dateOnly(i.captureAt))
     .filter((d): d is string => d != null)
@@ -108,14 +113,14 @@ export function renderSharePage(input: SharePageInput): string {
     })
     .join('\n')
 
-  // Client-side lightbox config. token/k are already in the visible URL — no new
-  // secret is exposed. `<` is escaped so a malicious filename cannot break out.
+  // Client-side lightbox config. `token` is already in the visible URL — no
+  // new secret is exposed. `<` is escaped so a malicious filename cannot break out.
   const cfg = {
     slug: share.slug,
     token,
-    k,
     full: isFull,
-    raws: withRaws,
+    download: canDownload,
+    raws: canRaw,
     imgs: images.map((image) => ({ id: image.id, name: displayName(image) })),
   }
 
@@ -148,6 +153,7 @@ ${PALETTE}
   header h1 { font-size: 1rem; font-weight: 600; margin: 0; }
   header .meta { color: var(--muted); font-size: .85rem; }
   header .spacer { flex: 1 1 auto; }
+  .note { color: var(--muted); font-size: .9rem; padding: 0 .75rem .5rem; white-space: pre-wrap; }
   .btn {
     display: inline-flex; align-items: center; gap: .4rem;
     padding: .5rem .85rem; border-radius: 8px; cursor: pointer;
@@ -198,8 +204,9 @@ ${PALETTE}
   <h1>${escapeHtml(title)}</h1>
   <span class="meta">${images.length} photo${images.length === 1 ? '' : 's'}${dateRange ? ` · ${escapeHtml(dateRange)}` : ''}</span>
   <span class="spacer"></span>
-  ${images.length > 0 ? `<a class="btn" href="${escapeHtml(zipUrl)}">Download all (.zip)</a>` : ''}
+  ${canDownload && images.length > 0 ? `<a class="btn" href="${escapeHtml(zipUrl)}">Download all (.zip)</a>` : ''}
 </header>
+${share.note ? `<p class="note">${escapeHtml(share.note)}</p>` : ''}
 <main>
   ${images.length === 0 ? `<p class="empty">No photos in this share yet.</p>` : `<div class="grid">${cells}</div>`}
 </main>
@@ -212,8 +219,8 @@ ${PALETTE}
     <button class="lb-btn lb-next" aria-label="Next">›</button>
     <div class="lb-bar">
       <span class="name" id="lbname"></span>
-      <a class="btn" id="lbdl" download>Download</a>
-      ${withRaws ? `<a class="btn" id="lbraw" download>RAW</a>` : ''}
+      ${canDownload ? `<a class="btn" id="lbdl" download>Download</a>` : ''}
+      ${canRaw ? `<a class="btn" id="lbraw" download>RAW</a>` : ''}
     </div>
   </div>
 </dialog>
@@ -222,7 +229,7 @@ ${PALETTE}
 const C = ${jsonForScript(cfg)};
 (function () {
   const enc = encodeURIComponent;
-  const auth = 'token=' + enc(C.token) + (C.k ? '&k=' + enc(C.k) : '');
+  const auth = 'token=' + enc(C.token);
   const base = '/s/' + enc(C.slug);
   const lb = document.getElementById('lb');
   const img = document.getElementById('lbimg');
@@ -243,7 +250,7 @@ const C = ${jsonForScript(cfg)};
     img.src = viewUrl(im);
     img.alt = im.name;
     name.textContent = im.name;
-    dl.href = base + '/file/' + im.id + '?' + auth;
+    if (dl) dl.href = base + '/file/' + im.id + '?' + auth;
     if (raw) raw.href = base + '/file/' + im.id + '?raw=1&' + auth;
   }
   function open(i) { show(i); if (!lb.open) lb.showModal(); }
@@ -278,61 +285,10 @@ const C = ${jsonForScript(cfg)};
 }
 
 /**
- * Render the password-unlock form for a protected share. `error` re-renders the
- * form with a failure message. POSTs to `/s/:slug/unlock?token=…`.
- */
-export function renderUnlockPage(input: { slug: string; token: string; error?: boolean }): string {
-  const slugU = encodeURIComponent(input.slug)
-  const action = `/s/${slugU}/unlock?token=${encodeURIComponent(input.token)}`
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex, nofollow">
-<title>Protected share</title>
-<style>
-${PALETTE}
-  html, body { height: 100%; margin: 0; }
-  body {
-    display: grid; place-items: center; background: var(--bg); color: var(--text);
-    font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 1.5rem;
-  }
-  form {
-    width: 100%; max-width: 22rem; display: grid; gap: .8rem;
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 12px; padding: 1.5rem;
-  }
-  h1 { font-size: 1.05rem; margin: 0; }
-  p { color: var(--muted); margin: 0; font-size: .9rem; }
-  input {
-    width: 100%; padding: .6rem .75rem; border-radius: 8px;
-    background: var(--surface-2); border: 1px solid var(--border);
-    color: var(--text); font: inherit;
-  }
-  button {
-    padding: .6rem .75rem; border-radius: 8px; cursor: pointer;
-    background: var(--accent); color: #0a0a0a; border: 0; font: inherit; font-weight: 600;
-  }
-  .err { color: #f87171; font-size: .85rem; }
-</style>
-</head>
-<body>
-  <form method="post" action="${escapeHtml(action)}">
-    <h1>This share is password protected</h1>
-    <p>Enter the password you were given to view the photos.</p>
-    ${input.error ? `<p class="err">Incorrect password. Please try again.</p>` : ''}
-    <input type="password" name="password" autocomplete="current-password" autofocus required aria-label="Password">
-    <button type="submit">Unlock</button>
-  </form>
-</body>
-</html>`
-}
-
-/**
  * The single opaque denial page (design §7). Fully implemented — every share
- * failure (missing/unknown slug, wrong/rolled/expired token, wrong `k`)
- * collapses to this exact response, never distinguishing cases.
+ * failure (missing/unknown slug, wrong/rolled/expired/revoked token, id
+ * outside the share, or a size/role the token does not permit) collapses to
+ * this exact response, never distinguishing cases.
  */
 export function render404Page(): string {
   return `<!doctype html>

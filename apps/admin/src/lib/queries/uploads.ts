@@ -4,7 +4,7 @@ import { client } from '../eden'
 
 export type UploadImageResponse = {
   id: number
-  root: 'uploads'
+  root: 'share'
   relPath: string
   adminFileUrl: string
 }
