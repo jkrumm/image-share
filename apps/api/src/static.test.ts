@@ -3,7 +3,6 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Elysia } from 'elysia'
-import { render404Page } from './share/page.js'
 import { createStaticPlugin } from './static.js'
 
 // Injected temp dist so the test is hermetic — it does not depend on a prior
@@ -23,11 +22,21 @@ afterAll(() => {
 })
 
 describe('static SPA plugin', () => {
-  it('serves the opaque share 404 page at the friend-facing root', async () => {
+  it('serves the byte-identical landing page at the friend-facing root, with no share data', async () => {
     const res = await get('/')
-    expect(res.status).toBe(404)
+    expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toContain('text/html')
-    expect(await res.text()).toBe(render404Page())
+    const html = await res.text()
+    // No slug/token/share knowledge of any kind — every bit of behavior is
+    // resolved client-side from the visitor's own localStorage (design §I).
+    // (the inline JS *builds* a `?token=` query string client-side — that's
+    // template code, not a leaked value — so we only assert no literal share
+    // path is baked into the response.)
+    expect(html).not.toMatch(/\/s\/[a-z0-9-]+/)
+    expect(html).toContain('id="landing-empty"')
+    expect(html).toContain('id="landing-section"')
+    // Fully deterministic across requests.
+    expect(html).toBe(await (await get('/')).text())
   })
 
   it('serves the SPA index at /admin', async () => {

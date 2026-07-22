@@ -8,7 +8,8 @@ import {
   type ShareTokenRole,
 } from '../lib/share-auth.js'
 import { rootBaseDir, safeJoin } from '../lib/paths.js'
-import { render404Page, renderSharePage } from './page.js'
+import { parseAcceptLanguage, type Locale } from './page/i18n.js'
+import { render404Page, renderSharePage } from './page/index.js'
 import { buildShareZip } from './zip.js'
 import { renderRendition } from '../renditions/render.js'
 
@@ -20,16 +21,23 @@ function attachment(name: string): string {
   return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(safe)}`
 }
 
+// Initial locale (design §E) — parsed purely from the request header, same
+// input every denial page and the share page itself resolve from. Never
+// depends on share/token state, so it cannot become a distinguishing oracle.
+function localeFromRequest(request: Request): Locale {
+  return parseAcceptLanguage(request.headers.get('accept-language'))
+}
+
 // Serve the opaque 404 page. Every denial cause funnels through here so the
 // public surface never distinguishes an unknown slug from a revoked token,
-// an out-of-share id, or a size/role the token does not permit.
-function notFound(set: {
-  status?: number | string
-  headers: Record<string, string | number>
-}): string {
+// an out-of-share id, or a size/route the token does not permit.
+function notFound(
+  set: { status?: number | string; headers: Record<string, string | number> },
+  locale: Locale,
+): string {
   set.status = 404
   set.headers['content-type'] = 'text/html; charset=utf-8'
-  return render404Page()
+  return render404Page(locale)
 }
 
 // Role gating (design §7 rework): `view` sees thumb/med renditions only;
@@ -60,20 +68,21 @@ export const shareRoutes = new Elysia({ name: 'shares' })
   // NOT be `as: 'scoped'` — a scoped onError leaks to sibling plugins mounted
   // after this one and breaks their route registration (verified on Elysia
   // 1.4.29). Local scope already covers every route defined here.
-  .onError(({ error, set }) => {
+  .onError(({ error, set, request }) => {
     // NotImplemented and every denial alike render the same page — the public
     // surface must never distinguish cases.
     void error
     set.status = 404
     set.headers['content-type'] = 'text/html; charset=utf-8'
-    return render404Page()
+    return render404Page(localeFromRequest(request))
   })
   .get(
     '/s/:slug',
-    async ({ params, query, set }) => {
+    async ({ params, query, set, request }) => {
+      const locale = localeFromRequest(request)
       const access = await resolveShareAccess({ slug: params.slug, token: query.token })
       // Invalid token / unknown slug / expired share → opaque 404.
-      if (!access) return notFound(set)
+      if (!access) return notFound(set, locale)
       const images = await listShareImages(access.share)
       set.headers['content-type'] = 'text/html; charset=utf-8'
       return renderSharePage({
@@ -81,6 +90,7 @@ export const shareRoutes = new Elysia({ name: 'shares' })
         images,
         token: access.token,
         role: access.role,
+        locale,
       })
     },
     {
@@ -96,14 +106,15 @@ export const shareRoutes = new Elysia({ name: 'shares' })
   )
   .get(
     '/s/:slug/img/:id',
-    async ({ params, query, set }) => {
+    async ({ params, query, set, request }) => {
+      const locale = localeFromRequest(request)
       const access = await resolveShareAccess({ slug: params.slug, token: query.token })
-      if (!access) return notFound(set)
+      if (!access) return notFound(set, locale)
       // The requested size must be permitted for the token's role (design §7).
-      if (!IMG_SIZES_BY_ROLE[access.role].has(query.size)) return notFound(set)
+      if (!IMG_SIZES_BY_ROLE[access.role].has(query.size)) return notFound(set, locale)
       // The id must belong to the share, else opaque 404.
       const image = await getShareImageById(access.share, params.id)
-      if (!image) return notFound(set)
+      if (!image) return notFound(set, locale)
       const absPath = safeJoin(rootBaseDir(image.root), image.relPath)
       const rendition = await renderRendition({
         absPath,
@@ -133,17 +144,18 @@ export const shareRoutes = new Elysia({ name: 'shares' })
   )
   .get(
     '/s/:slug/file/:id',
-    async ({ params, query, set }) => {
+    async ({ params, query, set, request }) => {
+      const locale = localeFromRequest(request)
       const access = await resolveShareAccess({ slug: params.slug, token: query.token })
-      if (!access) return notFound(set)
+      if (!access) return notFound(set, locale)
       // view-role tokens can never download a file (design §7).
-      if (!canDownloadFile(access.role)) return notFound(set)
+      if (!canDownloadFile(access.role)) return notFound(set, locale)
       const image = await getShareImageById(access.share, params.id)
-      if (!image) return notFound(set)
+      if (!image) return notFound(set, locale)
 
       if (query.raw === 1) {
         // Paired RAF — only a full-role token, and only when a pairing exists.
-        if (!canDownloadRaw(access.role) || !image.rawPath) return notFound(set)
+        if (!canDownloadRaw(access.role) || !image.rawPath) return notFound(set, locale)
         const rawAbs = safeJoin(rootBaseDir('raws'), image.rawPath)
         set.headers['content-type'] = 'application/octet-stream'
         set.headers['content-disposition'] = attachment(image.rawPath)
@@ -171,10 +183,11 @@ export const shareRoutes = new Elysia({ name: 'shares' })
   )
   .get(
     '/s/:slug/zip',
-    async ({ params, query, set }) => {
+    async ({ params, query, set, request }) => {
+      const locale = localeFromRequest(request)
       const access = await resolveShareAccess({ slug: params.slug, token: query.token })
-      if (!access) return notFound(set)
-      if (!canDownloadFile(access.role)) return notFound(set)
+      if (!access) return notFound(set, locale)
+      if (!canDownloadFile(access.role)) return notFound(set, locale)
       const images = await listShareImages(access.share)
       return buildShareZip({ share: access.share, images, role: access.role })
     },

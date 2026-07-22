@@ -2,7 +2,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Elysia } from 'elysia'
 import { safeJoin } from './lib/paths.js'
-import { render404Page } from './share/page.js'
+import { renderLandingPage } from './share/page/index.js'
 
 // Static SPA server for the admin app (design §1). Serves apps/admin/dist under
 // the `/admin` path prefix with an index.html fallback for client-side routing.
@@ -10,9 +10,11 @@ import { render404Page } from './share/page.js'
 // declines the API, share, openapi, and health surfaces so a miss there 404s
 // instead of returning the SPA shell.
 //
-// The friend-facing root `/` no longer serves the SPA — it returns the opaque
-// share 404 page (the same body an unknown slug renders) so the public root
-// stays clean and indistinguishable from the /s/* surface.
+// The friend-facing root `/` no longer serves the SPA — it serves the Stage 3
+// landing page (design §7/§I): a byte-identical static document for every
+// visitor that reads the visitor's own `localStorage` client-side to remember
+// (and redirect straight into) previously opened shares. It does zero server
+// lookups, so it can never become an oracle over shares/tokens.
 //
 // The admin dist may not exist yet during early scaffolding — /admin requests
 // then 404 cleanly (the Dockerfile builds it for prod).
@@ -34,9 +36,8 @@ export function createStaticPlugin(distDir: string = DEFAULT_DIST_DIR) {
     .get(
       '/',
       ({ set }) => {
-        set.status = 404
         set.headers['content-type'] = 'text/html; charset=utf-8'
-        return render404Page()
+        return renderLandingPage()
       },
       { detail: { hide: true } },
     )

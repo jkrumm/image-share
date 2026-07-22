@@ -23,7 +23,7 @@ image-share/
 │       ├── lib/{auth-guard.ts,traced-fetch.ts,paths.ts,share-auth.ts,s3.ts}
 │       ├── indexer/{scan.ts,metadata.ts}
 │       ├── renditions/{render.ts,cache.ts}
-│       ├── share/{page.ts,routes.ts,zip.ts}
+│       ├── share/{page/,routes.ts,zip.ts}   # page/ = index,styles,client,i18n,markdown,layout
 │       ├── routes/{health.ts,discovery.ts,library.ts,shares.ts,ingest.ts,publish.ts,b2.ts,stats.ts,index-admin.ts}
 │       ├── cron/{jobs.ts,reindex.ts,b2-reconcile.ts,reverse-backup.ts,rendition-sweep.ts,db-snapshot.ts}
 │       └── static.ts          # serves apps/admin/dist SPA fallback
@@ -152,13 +152,45 @@ Share content depends on `source_type`:
 - `selection`: images joined through `share_images` on `share_id`, ordered by `position`.
 
 Routes (all under `/s`, public):
-- `GET /s/:slug` — server-rendered HTML: responsive CSS grid (`<img loading="lazy">`, srcset thumb/med),
-  `<dialog>` lightbox (prev/next/keyboard/swipe, uses `med`; `full` for download/full-role tokens),
-  header with `share.title` + count + date range + "Download all (.zip)" (download/full roles only) +
-  `share.note` rendered as plain text below the heading. Per-image download link in the lightbox
-  (download/full roles), RAW download link (full role only). ALL CSS+JS inline, zero external
-  requests; dark, minimal. Mobile-first. STAGE 3 rewrites this page's design — the stage 1 version is
-  a minimal adaptation, not a design investment.
+- `GET /s/:slug` — server-rendered HTML (Stage 3 redesign, ported from the user's own
+  `photo-flow` gallery: whitespace/restraint, no cards/shadows/border-radius). Page assembly lives
+  in `share/page/` (split out of the old single `page.ts`): `index.ts` orchestrates, `styles.ts`
+  holds the CSS strings, `client.ts` holds the two inline `<script>` bodies (`headScript` — tiny,
+  runs in `<head>`, applies stored view/theme/lang before first paint; `mainScript` — segmented
+  controls, lightbox, i18n swap, remembered-share bookkeeping; `landingScript` — the `/` page's own
+  behavior), `i18n.ts` holds the de/en/es catalogues + `Accept-Language` parsing, `markdown.ts` is
+  the hand-written escape-then-transform renderer for `share.note`, `layout.ts` computes bento tile
+  spans. ALL CSS+JS is inline, zero external requests, `render404Page`/`renderLandingPage`/
+  `renderSharePage` all exported from `share/page/index.ts`.
+  - Three views (`view` setting, persisted client-side): `stream` (default; single column, the
+    ported `--pad-x/--pad-y/--vh-deduct` geometry, `object-fit: contain`, no crop), `grid` (uniform
+    1:1 `object-fit: cover` tiles, 2/3/4 responsive columns), `bento` (`grid-auto-flow: dense` with
+    per-tile spans from `layout.ts`: landscape → 2 columns, portrait → 2 rows, every 7th tile → 2×2,
+    else 1×1 — deterministic from index + aspect ratio so server and client always agree). Switching
+    views uses the View Transitions API (`document.startViewTransition`, plain-callback form) with a
+    CSS opacity/scale crossfade fallback when unsupported, skipped under `prefers-reduced-motion`.
+  - One sticky control bar: three segmented groups (view / theme=light|dark|system / lang=de|en|es)
+    with a sliding pill indicator, each persisted to `localStorage` (`image-share.{view,theme,lang}`)
+    and applied pre-paint by `headScript`.
+  - Header: title, a client-recomputed meta line (`Intl.DateTimeFormat`-based capture-date range +
+    localized photo count, so it follows a language switch without a round-trip), the note rendered
+    through `markdown.ts`, and a quiet text-button "Download all (.zip)" (download/full roles only).
+  - `<dialog>` lightbox unchanged in spirit (prev/next/keyboard/swipe, `med` or `full` per role,
+    per-image + RAW download links per role) with an opacity/scale open animation and body-scroll lock.
+  - Every element with visible copy carries `data-i18n`/`data-i18n-aria`; the full de/en/es
+    catalogue is always embedded for reload-free client-side language switching — its presence in
+    the page is not itself a role signal, only the presence of the actual gated DOM elements is.
+- `GET /` — the landing page (`renderLandingPage`, Stage 3, `apps/api/src/static.ts`), replacing the
+  old always-404 root. Byte-identical for every visitor: no server lookup, no request-derived state
+  of any kind (not even `Accept-Language` — its own client-side script resolves the initial language
+  from `localStorage`/`navigator.language`). All behavior is client-side against
+  `localStorage['image-share.shares']` (an array the share page's own script maintains: `{slug,
+  token, title, count, savedAt}`, deduped by slug, appended/refreshed on every successful share page
+  load): 0 remembered → a quiet neutral message; exactly 1 → immediate `location.replace` into it;
+  more than 1 → a list (title, photo count, last-opened, localized) linking to each with a per-entry
+  remove action. No endpoint anywhere validates or enumerates slugs/tokens for this page — it cannot
+  become an oracle. The share page header gets a share switcher (same localStorage list, current
+  slug excluded) once more than one share is remembered.
 - `GET /s/:slug/img/:id?size=thumb|med|full` — rendition bytes, `Cache-Control: private, max-age=31536000, immutable`.
   Size must be permitted for the token's role (table above); id must belong to the share else 404.
 - `GET /s/:slug/file/:id?raw=1` — attachment download of the original JPEG (download/full roles only;

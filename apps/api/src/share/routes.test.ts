@@ -7,7 +7,7 @@ import { createDb, db as defaultDb, runMigrations, type Db } from '../db/index.j
 import { images, shares, shareTokens } from '../db/schema.js'
 import { setShareDb } from '../lib/share-auth.js'
 import { rootBaseDir } from '../lib/paths.js'
-import { render404Page } from './page.js'
+import { render404Page } from './page/index.js'
 import { shareRoutes } from './routes.js'
 
 let db: Db
@@ -133,13 +133,16 @@ describe('GET /s/:slug (page)', () => {
 
   it('hides download/zip affordances for a view-role token', async () => {
     const html = await (await get('/s/gallery?token=view-tk')).text()
-    expect(html).not.toContain('Download all')
+    // Note: the localized string catalogue (for client-side language
+    // switching) is always embedded — the actual gating is whether the
+    // download-all element itself is rendered.
+    expect(html).not.toContain('data-i18n="downloadAll"')
     expect(html).not.toContain('id="lbdl"')
   })
 
   it('shows download but not RAW for a download-role token', async () => {
     const html = await (await get('/s/gallery?token=dl-tk')).text()
-    expect(html).toContain('Download all')
+    expect(html).toContain('data-i18n="downloadAll"')
     expect(html).toContain('id="lbdl"')
     expect(html).not.toContain('id="lbraw"')
   })
