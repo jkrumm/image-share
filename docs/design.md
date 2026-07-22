@@ -234,8 +234,33 @@ for numeric params, `z.enum` never literal-unions, ISO date strings, `detail` wi
   indexes immediately (`root='share'`) → 201 `{ id, root, relPath, adminFileUrl }`
 - `POST /api/publish` `{ imageIds: number[], prefix: 'fuji'|'blog'|'gen'|'misc' }` → for each: Bun.S3Client
   `.write('img/<prefix>/<filename>', file)` (skip+report if key exists), upsert b2_objects with
-  published_image_id → `{ published: [{ id, key, cdnUrl }] }` where cdnUrl = `CDN_BASE/<key minus img/>`.
-- `GET /api/b2?prefix=&page&limit` → b2_objects `{ data, total }` (flag `mirrored`, `publishedImageId`)
+  published_image_id → `{ published: [{ id, key, cdnUrl }] }` where `cdnUrl` comes from `lib/cdn.ts`
+  (below) — the single place both this route and `GET /api/b2` mint CDN URLs from.
+- **CDN URL shape (`lib/cdn.ts`, stage 4 — verified live against the real bucket, not assumed from
+  `~/SourceRoot/vps/docs/image-cdn.md` alone)**: `img.jkrumm.com`'s Traefik layer runs an
+  `imgproxy-short` `replacepathregex` middleware in front of imgproxy
+  (`~/SourceRoot/vps/apps/imgproxy/compose.yml`) that rewrites a short public path into imgproxy's raw
+  `/_/.../plain/img/<key>` form. `cdnOriginalUrl(key)` → `${CDN_BASE}/<key minus img/ prefix>` (no
+  processing-options segment — confirmed live to serve the original bytes; this is what `publish.ts`
+  already emitted pre-stage-4 and it was correct). `cdnThumbUrl(key, width)` →
+  `${CDN_BASE}/rs:fit:<width>/<key minus img/ prefix>` (confirmed live to serve a resized rendition,
+  longest side bounded to `width`).
+- `GET /api/b2?prefix=all|fuji|blog|gen|misc&page&limit&sort=lastModified|key|size&order` → b2_objects
+  `{ data: [{ ...row, mirrored, publishedImageId, cdnUrl, thumbUrl }], total, totalBytes,
+  unmirroredCount, lastReconcileAt }` — `total` is filtered by `prefix`/paginated; `totalBytes`,
+  `unmirroredCount`, and `lastReconcileAt` are always bucket-wide (ignore the filter) so the admin
+  Public page's header strip reads consistently regardless of the active filter. `thumbUrl` uses a
+  480px width (matches the renditions 'thumb' size, design §6). `lastReconcileAt` comes from an
+  in-memory status object in `cron/b2-reconcile.ts` (mirrors the indexer's status pattern, design §5)
+  — not persisted, resets on restart.
+- `POST /api/b2/upload` multipart `{ file, prefix: 'fuji'|'blog'|'gen'|'misc' }` → uploads straight to
+  B2 under `img/<prefix>/<sanitized filename>` (never touches a local disk root), skips (does not
+  overwrite) a pre-existing key, upserts b2_objects on success → `{ uploaded, key, cdnUrl, reason? }`.
+- `DELETE /api/b2/:key` — `key` is a single URL-encoded path segment (slashes included, e.g.
+  `img%2Ffuji%2Fx.jpg`). Rejects (400) unless the decoded key starts with `B2_PREFIX` and contains no
+  `..`/NUL traversal segment — the only guard between this route and the bucket, since `backups/`
+  lives in the same bucket as `img/` (see `~/SourceRoot/vps/docs/image-cdn.md`). Deletes via
+  `S3Port.delete` then removes the b2_objects row. Destructive and irreversible.
 - `POST /api/b2/reconcile` → 202 (S3 list `img/` → upsert/remove b2_objects rows)
 - `POST /api/backup/reverse-run` → 202 (download b2_objects lacking `mirrored_at` OR changed etag into
   `B2_MIRROR_DIR/<key minus img/>`, set mirrored_at; then GET `UPTIME_KUMA_PUSH_URL` if set — via tracedFetch)
@@ -297,12 +322,26 @@ order, BasaltProvider dark, Eden treaty typed on `App` from `@image-share/api` a
 `window.location.origin`, so `/api/*` resolves on the same host), zustand persisted bearer + AuthGate,
 createBasaltQueryClient, TanStack Router file-based. Pages (router paths, relative to the `/admin`
 basepath):
+Nav mental model (stage 4): **Library = private, on disk** vs **Public = published, on the CDN** —
+two peer nav items (labeled "Library (Private)" and "Public (CDN)") rather than the CDN state being
+buried in Activity.
+
 - **Library** `/` — left dir tree (from /api/library/dirs), grid (SimpleGrid + AspectRatio + Image,
   thumb via access_token URL), rating filter (Rating component), sort, pagination; lightbox = Modal
   fullScreen with med rendition + prev/next/keyboard; selection mode → actions: "Publish to CDN…"
   (prefix picker modal → notifyPromise), "Create share" (selection share, capture-display order, via
   `CreateShareModal`); folder toolbar → "Share whole folder" (folder share carrying the active
   minRating, via the same modal) — hidden for `root='raws'`.
+- **Public** `/public` (stage 4) — a browser for what actually lives on `img.jkrumm.com`, peer of
+  Library. Header strip (StatCards): object count, total bytes, not-mirrored count, last reconcile
+  time (all bucket-wide, from `GET /api/b2`'s aggregate fields) + Reconcile/Reverse-backup buttons
+  (`notifyPromise`) — moved off Activity. An upload control (prefix `Select` + `FileButton multi` →
+  `POST /api/b2/upload`, `notifyPromise` per file). A prefix filter (all/fuji/blog/gen/misc) + sort
+  (lastModified/key/size) + order + pagination, mirroring the Library page's search-param + zod
+  pattern. Thumbnail grid (SimpleGrid + AspectRatio + Image) loading `thumbUrl` **directly from
+  img.jkrumm.com** — never proxied through this API. Per tile: size + last-modified, a "not mirrored"
+  badge, a `CopyButton` for `cdnUrl`, and a delete action behind `modals.openConfirmModal` naming the
+  key (`DELETE /api/b2/:key`). `EmptyState` when nothing is published yet.
 - **Shares** `/shares` — admin-UX rework, stage 2: a pure navigation table (title, slug, source,
   image count, active-token count, created) whose rows link to the detail route; "New share" opens
   `CreateShareModal` in its root/dir-picker mode (the only entry point without ambient folder/selection
@@ -315,8 +354,9 @@ basepath):
   Images section (thumbnail grid; selection shares get a per-tile remove action patching `imageIds`,
   folder shares are read-only), a collapsed Settings section (note/expiry/minRating via PATCH), and a
   DangerZone delete action navigating back to `/shares`.
-- **Activity** `/activity` — StatCards from /api/stats, index status + "Rescan now", b2 objects table
-  (mirrored badge), buttons for reconcile/reverse-backup (notifyPromise).
+- **Activity** `/activity` — StatCards from /api/stats, index status + "Rescan now". The b2 objects
+  table and the reconcile/reverse-backup buttons moved to **Public** (stage 4) — Activity keeps only
+  the stats cards and the indexer control.
 - **Uploads** — FileButton multi-upload to POST /api/images with progress notifications.
 
 ## 13. Testing (bun:test; fixtures generated in test setup — never touch real trees)

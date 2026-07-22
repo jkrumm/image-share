@@ -11,6 +11,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
 
 const NAV_TARGETS: Record<string, { to: string }> = {
   library: { to: '/' },
+  public: { to: '/public' },
   shares: { to: '/shares' },
   activity: { to: '/activity' },
   uploads: { to: '/uploads' },
@@ -26,6 +27,7 @@ function RootLayout() {
   const matchRoute = useMatchRoute()
 
   const isLibraryActive = !!matchRoute({ to: '/' })
+  const isPublicActive = !!matchRoute({ to: '/public', fuzzy: true })
   const isSharesActive = !!matchRoute({ to: '/shares', fuzzy: true })
   const isActivityActive = !!matchRoute({ to: '/activity', fuzzy: true })
   const isUploadsActive = !!matchRoute({ to: '/uploads', fuzzy: true })
@@ -50,7 +52,20 @@ function RootLayout() {
     {
       label: 'Image Share',
       items: [
-        { key: 'library', label: 'Library', icon: null, href: '/', active: isLibraryActive },
+        {
+          key: 'library',
+          label: 'Library (Private)',
+          icon: null,
+          href: '/',
+          active: isLibraryActive,
+        },
+        {
+          key: 'public',
+          label: 'Public (CDN)',
+          icon: null,
+          href: '/public',
+          active: isPublicActive,
+        },
         {
           key: 'shares',
           label: 'Shares',

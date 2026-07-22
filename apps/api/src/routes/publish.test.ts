@@ -89,6 +89,9 @@ describe('POST /api/publish', () => {
         return v
       },
       head: async () => null,
+      delete: async (key) => {
+        delete written[key]
+      },
     })
 
     const app = new Elysia().use(publishRoutes)
@@ -127,6 +130,7 @@ describe('POST /api/publish', () => {
       },
       get: async () => new Uint8Array(),
       head: async () => null,
+      delete: async () => {},
     })
 
     const app = new Elysia().use(publishRoutes)

@@ -51,6 +51,7 @@ describe('runReverseBackup', () => {
       put: async () => {},
       get: async () => new Uint8Array([1, 2, 3, 4, 5]),
       head: async () => null,
+      delete: async () => {},
     })
 
     const result = await runReverseBackup()
@@ -89,6 +90,7 @@ describe('runReverseBackup', () => {
         return new Uint8Array([1, 2, 3])
       },
       head: async () => null,
+      delete: async () => {},
     })
 
     await runReverseBackup()

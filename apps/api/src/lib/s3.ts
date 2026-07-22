@@ -22,6 +22,9 @@ export interface S3Port {
   get(key: string): Promise<Uint8Array>
   /** Head metadata for a single key, or null if it does not exist. */
   head(key: string): Promise<S3Object | null>
+  /** Delete a key from the bucket. Callers must validate the key (prefix +
+   * traversal) before calling — this port performs no guarding itself. */
+  delete(key: string): Promise<void>
 }
 
 /**
@@ -85,6 +88,10 @@ export function createBunS3(): S3Port {
       } catch {
         return null
       }
+    },
+
+    async delete(key) {
+      await bucket.delete(key)
     },
   }
 }

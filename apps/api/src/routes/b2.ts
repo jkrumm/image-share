@@ -1,13 +1,23 @@
+import { basename, extname } from 'node:path'
 import { Elysia } from 'elysia'
 import { z } from 'zod'
-import { count, like } from 'drizzle-orm'
-import { runB2Reconcile } from '../cron/b2-reconcile.js'
+import { asc, count, desc, eq, isNull, like, sql } from 'drizzle-orm'
+import { getB2ReconcileStatus, runB2Reconcile } from '../cron/b2-reconcile.js'
 import { runReverseBackup } from '../cron/reverse-backup.js'
 import { db } from '../db/index.js'
 import { b2Objects } from '../db/schema.js'
+import { env } from '../env.js'
+import { cdnOriginalUrl, cdnThumbUrl } from '../lib/cdn.js'
+import { getS3 } from '../lib/s3.js'
 
-// B2 object views + maintenance actions (design §8). Reads the b2_objects
-// mirror table; reconcile + reverse-backup run the corresponding jobs on demand.
+// B2 object views + maintenance actions (design §8, extended in stage 4 for
+// the admin Public page: prefix/sort/pagination on the list, plus delete and
+// direct-to-B2 upload). Reads the b2_objects mirror table; reconcile +
+// reverse-backup run the corresponding jobs on demand.
+
+const B2_PREFIX_GROUP = ['fuji', 'blog', 'gen', 'misc'] as const
+const THUMB_WIDTH = 480 // matches the renditions 'thumb' size (design §6)
+
 const B2ObjectDto = z.object({
   key: z.string(),
   size: z.number().int(),
@@ -16,7 +26,28 @@ const B2ObjectDto = z.object({
   mirrored: z.boolean().describe('Whether the key has been pulled into B2_MIRROR_DIR'),
   publishedImageId: z.number().int().nullable(),
   firstSeenAt: z.string(),
+  cdnUrl: z.string().describe('Original-bytes img.jkrumm.com URL'),
+  thumbUrl: z.string().describe(`Resized (rs:fit:${THUMB_WIDTH}) img.jkrumm.com URL`),
 })
+
+/** Validates a decoded B2 key is inside the managed prefix and free of
+ * traversal segments. Throws a plain Error (routes surface it as a 400) —
+ * this is the single guard both DELETE and upload key-construction go through. */
+function assertManagedKey(key: string): void {
+  if (!key.startsWith(env.B2_PREFIX)) {
+    throw new Error(`key must start with the managed prefix "${env.B2_PREFIX}"`)
+  }
+  if (key.includes('..') || key.includes('\0')) {
+    throw new Error('key contains a traversal segment')
+  }
+}
+
+function sanitizeUploadFilename(originalName: string): string {
+  const ext = extname(originalName)
+  const rawStem = basename(originalName, ext) || 'upload'
+  const stem = rawStem.replace(/[^a-zA-Z0-9_-]+/g, '_') || 'upload'
+  return `${stem}${ext}`
+}
 
 export const b2Routes = new Elysia({ name: 'b2' })
   .get(
@@ -24,12 +55,29 @@ export const b2Routes = new Elysia({ name: 'b2' })
     async ({ query }) => {
       const page = query.page ?? 1
       const limit = query.limit ?? 50
+      const sort = query.sort ?? 'lastModified'
+      const order = query.order ?? 'desc'
       const offset = (page - 1) * limit
-      const where = query.prefix ? like(b2Objects.key, `${query.prefix}%`) : undefined
 
-      const [rows, countResult] = await Promise.all([
-        db.select().from(b2Objects).where(where).limit(limit).offset(offset),
+      const where =
+        query.prefix && query.prefix !== 'all'
+          ? like(b2Objects.key, `${env.B2_PREFIX}${query.prefix}/%`)
+          : undefined
+
+      const sortCol =
+        sort === 'key' ? b2Objects.key : sort === 'size' ? b2Objects.size : b2Objects.lastModified
+
+      const [rows, countResult, totalBytesResult, unmirroredResult] = await Promise.all([
+        db
+          .select()
+          .from(b2Objects)
+          .where(where)
+          .orderBy(order === 'asc' ? asc(sortCol) : desc(sortCol))
+          .limit(limit)
+          .offset(offset),
         db.select({ count: count() }).from(b2Objects).where(where),
+        db.select({ sum: sql<number>`coalesce(sum(${b2Objects.size}), 0)` }).from(b2Objects),
+        db.select({ count: count() }).from(b2Objects).where(isNull(b2Objects.mirroredAt)),
       ])
 
       return {
@@ -41,22 +89,40 @@ export const b2Routes = new Elysia({ name: 'b2' })
           mirrored: row.mirroredAt !== null,
           publishedImageId: row.publishedImageId,
           firstSeenAt: row.firstSeenAt,
+          cdnUrl: cdnOriginalUrl(row.key),
+          thumbUrl: cdnThumbUrl(row.key, THUMB_WIDTH),
         })),
         total: Number(countResult[0]?.count ?? 0),
+        totalBytes: Number(totalBytesResult[0]?.sum ?? 0),
+        unmirroredCount: Number(unmirroredResult[0]?.count ?? 0),
+        lastReconcileAt: getB2ReconcileStatus().lastFinishedAt,
       }
     },
     {
       query: z.object({
-        prefix: z.string().optional().describe('Filter by key prefix'),
+        prefix: z
+          .enum(['all', ...B2_PREFIX_GROUP])
+          .optional()
+          .describe('Filter by the img/<prefix>/ grouping; omit or "all" for everything'),
         page: z.coerce.number().int().min(1).default(1).optional(),
         limit: z.coerce.number().int().min(1).max(200).default(50).optional(),
+        sort: z.enum(['lastModified', 'key', 'size']).default('lastModified').optional(),
+        order: z.enum(['asc', 'desc']).default('desc').optional(),
       }),
-      response: { 200: z.object({ data: z.array(B2ObjectDto), total: z.number().int() }) },
+      response: {
+        200: z.object({
+          data: z.array(B2ObjectDto),
+          total: z.number().int(),
+          totalBytes: z.number().int().describe('Sum of size across ALL objects (unfiltered)'),
+          unmirroredCount: z.number().int().describe('Count lacking mirrored_at (unfiltered)'),
+          lastReconcileAt: z.string().nullable().describe('When the bucket was last reconciled'),
+        }),
+      },
       detail: {
         tags: ['Backblaze'],
         summary: 'List mirrored B2 objects',
         description:
-          'Paginated view of the b2_objects table (the local mirror of the bucket keyspace), optionally filtered by key prefix. Each row flags whether it has been reverse-mirrored locally and links to the library image it was published from (if any).',
+          'Paginated view of the b2_objects table (the local mirror of the bucket keyspace), filterable by the img/<prefix>/ grouping and sortable by lastModified/key/size. Each row flags whether it has been reverse-mirrored locally, links to the library image it was published from (if any), and carries ready-to-use CDN URLs. totalBytes/unmirroredCount/lastReconcileAt are always bucket-wide, ignoring the prefix filter, so the admin Public page can show cache health regardless of the active filter.',
         security: [{ BearerAuth: [] }],
       },
     },
@@ -79,6 +145,86 @@ export const b2Routes = new Elysia({ name: 'b2' })
         summary: 'Reconcile the B2 bucket into b2_objects',
         description:
           'Starts a background job that lists the img/ keyspace via S3 and upserts/removes b2_objects rows so out-of-band uploads (photoflow/rclone) appear locally. Returns 202 immediately.',
+        security: [{ BearerAuth: [] }],
+      },
+    },
+  )
+  .post(
+    '/api/b2/upload',
+    async ({ body }) => {
+      const filename = sanitizeUploadFilename(body.file.name)
+      const key = `${env.B2_PREFIX}${body.prefix}/${filename}`
+
+      const s3 = getS3()
+      if (await s3.exists(key)) {
+        return { uploaded: false, key, cdnUrl: cdnOriginalUrl(key), reason: 'key already exists' }
+      }
+
+      const bytes = await body.file.bytes()
+      await s3.put(key, bytes)
+
+      const now = new Date().toISOString()
+      await db.insert(b2Objects).values({
+        key,
+        size: bytes.byteLength,
+        lastModified: now,
+        firstSeenAt: now,
+      })
+
+      return { uploaded: true, key, cdnUrl: cdnOriginalUrl(key) }
+    },
+    {
+      body: z.object({
+        file: z.file().describe('The image file to upload'),
+        prefix: z.enum(B2_PREFIX_GROUP),
+      }),
+      response: {
+        200: z.object({
+          uploaded: z.boolean(),
+          key: z.string(),
+          cdnUrl: z.string(),
+          reason: z.string().optional().describe('Present when uploaded is false'),
+        }),
+      },
+      detail: {
+        tags: ['Backblaze'],
+        summary: 'Upload a file straight to the B2 img/ keyspace',
+        description:
+          'Multipart upload directly to B2 under img/<prefix>/<filename> (prefix ∈ fuji|blog|gen|misc) — never touches the local disk roots. Skips (does not overwrite) a key that already exists, mirroring POST /api/publish. Upserts b2_objects on success and returns the CDN URL.',
+        security: [{ BearerAuth: [] }],
+      },
+    },
+  )
+  .delete(
+    '/api/b2/:key',
+    async ({ params, status }) => {
+      let key: string
+      try {
+        key = decodeURIComponent(params.key)
+      } catch {
+        return status(400, 'Malformed key encoding')
+      }
+
+      try {
+        assertManagedKey(key)
+      } catch (err) {
+        return status(400, err instanceof Error ? err.message : 'Invalid key')
+      }
+
+      await getS3().delete(key)
+      await db.delete(b2Objects).where(eq(b2Objects.key, key))
+      return { deleted: true }
+    },
+    {
+      params: z.object({
+        key: z.string().describe('URL-encoded full B2 key, e.g. img%2Ffuji%2Fx.jpg'),
+      }),
+      response: { 200: z.object({ deleted: z.boolean() }), 400: z.string() },
+      detail: {
+        tags: ['Backblaze'],
+        summary: 'Delete an object from B2',
+        description:
+          'Deletes a key from the bucket and its b2_objects row. The key must be URL-encoded (slashes included) as a single path segment and must start with the managed img/ prefix — anything else, including traversal segments, is rejected with 400 before touching B2. Destructive and irreversible.',
         security: [{ BearerAuth: [] }],
       },
     },

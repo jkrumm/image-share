@@ -16,11 +16,26 @@ export interface ReconcileResult {
   removed: number
 }
 
+export interface B2ReconcileStatus {
+  lastStartedAt: string | null
+  lastFinishedAt: string | null
+}
+
+// Single source of truth for "how stale is the b2_objects cache", surfaced by
+// GET /api/b2 (design §8) so the admin Public page can show cache staleness.
+// Mirrors indexer/scan.ts's status-object pattern.
+const status: B2ReconcileStatus = { lastStartedAt: null, lastFinishedAt: null }
+
+export function getB2ReconcileStatus(): B2ReconcileStatus {
+  return { ...status }
+}
+
 /**
  * List the img/ keyspace via the S3 port and upsert/remove b2_objects rows so
  * out-of-band uploads (photoflow/rclone) appear locally (design §8).
  */
 export async function runB2Reconcile(): Promise<ReconcileResult> {
+  status.lastStartedAt = new Date().toISOString()
   const objects = await getS3().list(env.B2_PREFIX)
   const seenKeys = new Set(objects.map((o) => o.key))
   const now = new Date().toISOString()
@@ -56,6 +71,7 @@ export async function runB2Reconcile(): Promise<ReconcileResult> {
     await db.delete(b2Objects).where(inArray(b2Objects.key, staleKeys))
   }
 
+  status.lastFinishedAt = new Date().toISOString()
   return { listed: objects.length, upserted, removed: staleKeys.length }
 }
 

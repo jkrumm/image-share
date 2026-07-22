@@ -1,14 +1,16 @@
-import { describe, expect, it, mock } from 'bun:test'
+import { describe, expect, it, afterAll, mock } from 'bun:test'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
+import { eq } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/bun-sqlite'
 import { migrate } from 'drizzle-orm/bun-sqlite/migrator'
 import { Elysia } from 'elysia'
 import * as schema from '../db/schema.js'
+import { env } from '../env.js'
 
 // Isolated :memory: db — see the note in shares.test.ts (same `--isolate`
-// caveat). This file only exercises the GET /api/b2 listing handler — the
-// POST reconcile/reverse-backup 202 routes wrap cron/b2-reconcile.js and
+// caveat). This file only exercises the GET/DELETE/upload b2 route handlers —
+// the POST reconcile/reverse-backup 202 routes wrap cron/b2-reconcile.js and
 // cron/reverse-backup.js, which have their OWN dedicated direct-import unit
 // tests (cron/b2-reconcile.test.ts, cron/reverse-backup.test.ts) precisely to
 // avoid a second, competing `mock.module('../db/index.js', …)` binding for
@@ -26,16 +28,31 @@ mock.module('../db/index.js', () => ({
 }))
 
 const { b2Routes } = await import('./b2.js')
+const { setS3 } = await import('../lib/s3.js')
+
+afterAll(() => {
+  setS3(null)
+})
 
 interface B2Dto {
   key: string
   size: number
   mirrored: boolean
   publishedImageId: number | null
+  cdnUrl: string
+  thumbUrl: string
+}
+
+interface B2ListResponse {
+  data: B2Dto[]
+  total: number
+  totalBytes: number
+  unmirroredCount: number
+  lastReconcileAt: string | null
 }
 
 describe('GET /api/b2', () => {
-  it('lists objects with mirrored flag + prefix filter + pagination total', async () => {
+  it('lists objects with mirrored flag + cdn/thumb URLs + prefix grouping + pagination total', async () => {
     const now = new Date().toISOString()
     await testDb.insert(schema.b2Objects).values([
       {
@@ -56,20 +73,202 @@ describe('GET /api/b2', () => {
 
     const app = new Elysia().use(b2Routes)
 
-    const all = (await (await app.handle(new Request('http://localhost/api/b2'))).json()) as {
-      data: B2Dto[]
-      total: number
-    }
+    const all = (await (
+      await app.handle(new Request('http://localhost/api/b2'))
+    ).json()) as B2ListResponse
     expect(all.total).toBe(2)
+    expect(all.totalBytes).toBe(3)
+    expect(all.unmirroredCount).toBe(1)
     const a = all.data.find((r) => r.key === 'img/fuji/a.jpg')
     const b = all.data.find((r) => r.key === 'img/blog/b.jpg')
     expect(a?.mirrored).toBe(true)
     expect(b?.mirrored).toBe(false)
+    expect(a?.cdnUrl).toBe(`${env.CDN_BASE}/fuji/a.jpg`)
+    expect(a?.thumbUrl).toBe(`${env.CDN_BASE}/rs:fit:480/fuji/a.jpg`)
 
     const filtered = (await (
-      await app.handle(new Request('http://localhost/api/b2?prefix=img/fuji'))
-    ).json()) as { data: B2Dto[]; total: number }
+      await app.handle(new Request('http://localhost/api/b2?prefix=fuji'))
+    ).json()) as B2ListResponse
     expect(filtered.total).toBe(1)
     expect(filtered.data[0]?.key).toBe('img/fuji/a.jpg')
+    // Aggregates stay bucket-wide regardless of the prefix filter.
+    expect(filtered.totalBytes).toBe(3)
+    expect(filtered.unmirroredCount).toBe(1)
+
+    const allExplicit = (await (
+      await app.handle(new Request('http://localhost/api/b2?prefix=all'))
+    ).json()) as B2ListResponse
+    expect(allExplicit.total).toBe(2)
+  })
+
+  it('sorts by size ascending/descending', async () => {
+    const app = new Elysia().use(b2Routes)
+
+    const asc = (await (
+      await app.handle(new Request('http://localhost/api/b2?sort=size&order=asc'))
+    ).json()) as B2ListResponse
+    expect(asc.data.map((r) => r.size)).toEqual([1, 2])
+
+    const desc = (await (
+      await app.handle(new Request('http://localhost/api/b2?sort=size&order=desc'))
+    ).json()) as B2ListResponse
+    expect(desc.data.map((r) => r.size)).toEqual([2, 1])
+  })
+})
+
+describe('DELETE /api/b2/:key', () => {
+  it('deletes a valid key via the S3 port and removes its row', async () => {
+    const now = new Date().toISOString()
+    await testDb.insert(schema.b2Objects).values({
+      key: 'img/misc/deleteme.jpg',
+      size: 5,
+      lastModified: now,
+      firstSeenAt: now,
+    })
+
+    const deletedKeys: string[] = []
+    setS3({
+      list: async () => [],
+      exists: async () => false,
+      put: async () => {},
+      get: async () => new Uint8Array(),
+      head: async () => null,
+      delete: async (key) => {
+        deletedKeys.push(key)
+      },
+    })
+
+    const app = new Elysia().use(b2Routes)
+    const res = await app.handle(
+      new Request(`http://localhost/api/b2/${encodeURIComponent('img/misc/deleteme.jpg')}`, {
+        method: 'DELETE',
+      }),
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { deleted: boolean }
+    expect(body.deleted).toBe(true)
+    expect(deletedKeys).toEqual(['img/misc/deleteme.jpg'])
+
+    const rows = await testDb
+      .select()
+      .from(schema.b2Objects)
+      .where(eq(schema.b2Objects.key, 'img/misc/deleteme.jpg'))
+    expect(rows).toHaveLength(0)
+  })
+
+  it('rejects a key outside the managed B2_PREFIX', async () => {
+    let deleteCalled = false
+    setS3({
+      list: async () => [],
+      exists: async () => false,
+      put: async () => {},
+      get: async () => new Uint8Array(),
+      head: async () => null,
+      delete: async () => {
+        deleteCalled = true
+      },
+    })
+
+    const app = new Elysia().use(b2Routes)
+    const res = await app.handle(
+      new Request(
+        `http://localhost/api/b2/${encodeURIComponent('backups/vps/postgres/dump.sql')}`,
+        { method: 'DELETE' },
+      ),
+    )
+    expect(res.status).toBe(400)
+    expect(deleteCalled).toBe(false)
+  })
+
+  it('rejects a traversal attempt even when prefixed with img/', async () => {
+    let deleteCalled = false
+    setS3({
+      list: async () => [],
+      exists: async () => false,
+      put: async () => {},
+      get: async () => new Uint8Array(),
+      head: async () => null,
+      delete: async () => {
+        deleteCalled = true
+      },
+    })
+
+    const app = new Elysia().use(b2Routes)
+    const res = await app.handle(
+      new Request(
+        `http://localhost/api/b2/${encodeURIComponent('img/../backups/vps/postgres/dump.sql')}`,
+        { method: 'DELETE' },
+      ),
+    )
+    expect(res.status).toBe(400)
+    expect(deleteCalled).toBe(false)
+  })
+})
+
+describe('POST /api/b2/upload', () => {
+  it('uploads a new file straight to B2 and upserts b2_objects', async () => {
+    const written: Record<string, Uint8Array> = {}
+    setS3({
+      list: async () => [],
+      exists: async (key) => key in written,
+      put: async (key, data) => {
+        written[key] = data instanceof Uint8Array ? data : new Uint8Array(data as ArrayBuffer)
+      },
+      get: async (key) => {
+        const v = written[key]
+        if (!v) throw new Error('not found')
+        return v
+      },
+      head: async () => null,
+      delete: async () => {},
+    })
+
+    const app = new Elysia().use(b2Routes)
+    const form = new FormData()
+    form.set('file', new File([new Uint8Array([1, 2, 3])], 'weird name!.jpg'))
+    form.set('prefix', 'misc')
+
+    const res = await app.handle(
+      new Request('http://localhost/api/b2/upload', { method: 'POST', body: form }),
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { uploaded: boolean; key: string; cdnUrl: string }
+    expect(body.uploaded).toBe(true)
+    expect(body.key).toBe('img/misc/weird_name_.jpg')
+    expect(body.cdnUrl).toBe(`${env.CDN_BASE}/misc/weird_name_.jpg`)
+    expect(written['img/misc/weird_name_.jpg']).toBeDefined()
+
+    const rows = await testDb
+      .select()
+      .from(schema.b2Objects)
+      .where(eq(schema.b2Objects.key, 'img/misc/weird_name_.jpg'))
+    expect(rows).toHaveLength(1)
+  })
+
+  it('skips (does not overwrite) a key that already exists on B2', async () => {
+    const putCalls: string[] = []
+    setS3({
+      list: async () => [],
+      exists: async () => true, // pretend the key is already published
+      put: async (key) => {
+        putCalls.push(key)
+      },
+      get: async () => new Uint8Array(),
+      head: async () => null,
+      delete: async () => {},
+    })
+
+    const app = new Elysia().use(b2Routes)
+    const form = new FormData()
+    form.set('file', new File([new Uint8Array([9])], 'already.jpg'))
+    form.set('prefix', 'misc')
+
+    const res = await app.handle(
+      new Request('http://localhost/api/b2/upload', { method: 'POST', body: form }),
+    )
+    const body = (await res.json()) as { uploaded: boolean; reason?: string }
+    expect(body.uploaded).toBe(false)
+    expect(body.reason).toBe('key already exists')
+    expect(putCalls).toHaveLength(0)
   })
 })

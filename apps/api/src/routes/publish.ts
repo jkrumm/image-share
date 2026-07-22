@@ -5,16 +5,13 @@ import { getS3 } from '../lib/s3.js'
 import { db } from '../db/index.js'
 import { images, b2Objects } from '../db/schema.js'
 import { env } from '../env.js'
+import { cdnOriginalUrl } from '../lib/cdn.js'
 import { rootBaseDir, safeJoin } from '../lib/paths.js'
 
 // Publish to the public CDN (design §8). Copies images to B2 under
 // img/<prefix>/<filename>, skips-and-reports existing keys, upserts b2_objects
-// with published_image_id, and returns the img.jkrumm.com CDN URLs.
-
-function cdnUrlForKey(key: string): string {
-  const withoutPrefix = key.startsWith(env.B2_PREFIX) ? key.slice(env.B2_PREFIX.length) : key
-  return `${env.CDN_BASE}/${withoutPrefix}`
-}
+// with published_image_id, and returns the img.jkrumm.com CDN URLs (via the
+// shared lib/cdn.ts helper — also used by routes/b2.ts, design §8/§12 stage 4).
 
 export const publishRoutes = new Elysia({ name: 'publish' }).post(
   '/api/publish',
@@ -63,7 +60,7 @@ export const publishRoutes = new Elysia({ name: 'publish' }).post(
         })
       }
 
-      published.push({ id, key, cdnUrl: cdnUrlForKey(key) })
+      published.push({ id, key, cdnUrl: cdnOriginalUrl(key) })
     }
 
     return { published, skipped }

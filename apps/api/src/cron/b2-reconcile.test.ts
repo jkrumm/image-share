@@ -53,6 +53,7 @@ describe('runB2Reconcile', () => {
       put: async () => {},
       get: async () => new Uint8Array(),
       head: async () => null,
+      delete: async () => {},
     })
 
     const result = await runB2Reconcile()

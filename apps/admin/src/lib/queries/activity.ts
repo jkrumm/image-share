@@ -25,16 +25,6 @@ export type IndexStatusDto = {
   lastError: string | null
 }
 
-export type B2ObjectDto = {
-  key: string
-  size: number
-  lastModified: string
-  etag: string | null
-  mirrored: boolean
-  publishedImageId: number | null
-  firstSeenAt: string
-}
-
 export const activityQueries = {
   stats: () =>
     queryOptions({
@@ -49,39 +39,15 @@ export const activityQueries = {
       queryFn: () => unwrap(client.api.index.status.get()),
       refetchInterval: 5000,
     }),
-  b2: (params: { prefix?: string; page?: number; limit?: number }) =>
-    queryOptions({
-      queryKey: ['b2', 'list', params] as const,
-      queryFn: () => unwrap(client.api.b2.get({ query: params })),
-    }),
-}
-
-function invalidateActivity(qc: ReturnType<typeof useQueryClient>) {
-  void qc.invalidateQueries({ queryKey: ['stats'] })
-  void qc.invalidateQueries({ queryKey: ['index'] })
-  void qc.invalidateQueries({ queryKey: ['b2'] })
 }
 
 export function useTriggerRescan() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: () => unwrap(client.api.index.rescan.post()),
-    onSuccess: () => invalidateActivity(qc),
-  })
-}
-
-export function useTriggerB2Reconcile() {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: () => unwrap(client.api.b2.reconcile.post()),
-    onSuccess: () => invalidateActivity(qc),
-  })
-}
-
-export function useTriggerReverseBackup() {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: () => unwrap(client.api.backup['reverse-run'].post()),
-    onSuccess: () => invalidateActivity(qc),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['stats'] })
+      void qc.invalidateQueries({ queryKey: ['index'] })
+    },
   })
 }
