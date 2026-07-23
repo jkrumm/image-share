@@ -206,7 +206,7 @@ describe('DELETE /api/b2/:key', () => {
 })
 
 describe('POST /api/b2/upload', () => {
-  it('uploads a new file straight to B2 and upserts b2_objects', async () => {
+  it('uploads a new file straight to B2 and upserts b2_objects (readable prefix keeps the sanitized name)', async () => {
     const written: Record<string, Uint8Array> = {}
     setS3({
       list: async () => [],
@@ -226,6 +226,45 @@ describe('POST /api/b2/upload', () => {
     const app = new Elysia().use(b2Routes)
     const form = new FormData()
     form.set('file', new File([new Uint8Array([1, 2, 3])], 'weird name!.jpg'))
+    form.set('prefix', 'fuji')
+
+    const res = await app.handle(
+      new Request('http://localhost/api/b2/upload', { method: 'POST', body: form }),
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { uploaded: boolean; key: string; cdnUrl: string }
+    expect(body.uploaded).toBe(true)
+    expect(body.key).toBe('img/fuji/weird_name_.jpg')
+    expect(body.cdnUrl).toBe(`${env.CDN_BASE}/fuji/weird_name_.jpg`)
+    expect(written['img/fuji/weird_name_.jpg']).toBeDefined()
+
+    const rows = await testDb
+      .select()
+      .from(schema.b2Objects)
+      .where(eq(schema.b2Objects.key, 'img/fuji/weird_name_.jpg'))
+    expect(rows).toHaveLength(1)
+  })
+
+  it('uploads under an opaque prefix (misc) with a random 16-char [a-z0-9] key, preserving the extension', async () => {
+    const written: Record<string, Uint8Array> = {}
+    setS3({
+      list: async () => [],
+      exists: async (key) => key in written,
+      put: async (key, data) => {
+        written[key] = data instanceof Uint8Array ? data : new Uint8Array(data as ArrayBuffer)
+      },
+      get: async (key) => {
+        const v = written[key]
+        if (!v) throw new Error('not found')
+        return v
+      },
+      head: async () => null,
+      delete: async () => {},
+    })
+
+    const app = new Elysia().use(b2Routes)
+    const form = new FormData()
+    form.set('file', new File([new Uint8Array([1, 2, 3])], 'secret-plan.png'))
     form.set('prefix', 'misc')
 
     const res = await app.handle(
@@ -234,15 +273,9 @@ describe('POST /api/b2/upload', () => {
     expect(res.status).toBe(200)
     const body = (await res.json()) as { uploaded: boolean; key: string; cdnUrl: string }
     expect(body.uploaded).toBe(true)
-    expect(body.key).toBe('img/misc/weird_name_.jpg')
-    expect(body.cdnUrl).toBe(`${env.CDN_BASE}/misc/weird_name_.jpg`)
-    expect(written['img/misc/weird_name_.jpg']).toBeDefined()
-
-    const rows = await testDb
-      .select()
-      .from(schema.b2Objects)
-      .where(eq(schema.b2Objects.key, 'img/misc/weird_name_.jpg'))
-    expect(rows).toHaveLength(1)
+    expect(body.key).toMatch(/^img\/misc\/[a-z0-9]{16}\.png$/)
+    expect(body.key).not.toContain('secret')
+    expect(written[body.key]).toBeDefined()
   })
 
   it('skips (does not overwrite) a key that already exists on B2', async () => {

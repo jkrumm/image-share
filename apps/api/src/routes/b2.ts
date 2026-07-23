@@ -8,6 +8,7 @@ import { db } from '../db/index.js'
 import { b2Objects } from '../db/schema.js'
 import { env } from '../env.js'
 import { cdnOriginalUrl, cdnThumbUrl } from '../lib/cdn.js'
+import { deriveObjectFilename } from '../lib/naming.js'
 import { getS3 } from '../lib/s3.js'
 
 // B2 object views + maintenance actions (design §8, extended in stage 4 for
@@ -152,7 +153,7 @@ export const b2Routes = new Elysia({ name: 'b2' })
   .post(
     '/api/b2/upload',
     async ({ body }) => {
-      const filename = sanitizeUploadFilename(body.file.name)
+      const filename = deriveObjectFilename(body.prefix, sanitizeUploadFilename(body.file.name))
       const key = `${env.B2_PREFIX}${body.prefix}/${filename}`
 
       const s3 = getS3()
@@ -190,7 +191,7 @@ export const b2Routes = new Elysia({ name: 'b2' })
         tags: ['Backblaze'],
         summary: 'Upload a file straight to the B2 img/ keyspace',
         description:
-          'Multipart upload directly to B2 under img/<prefix>/<filename> (prefix ∈ fuji|blog|gen|misc) — never touches the local disk roots. Skips (does not overwrite) a key that already exists, mirroring POST /api/publish. Upserts b2_objects on success and returns the CDN URL.',
+          'Multipart upload directly to B2 under img/<prefix>/<filename> (prefix ∈ fuji|blog|gen|misc) — never touches the local disk roots. Readable prefixes (fuji/blog) use the sanitized upload filename; opaque prefixes (gen/misc) mint a random 16-char [a-z0-9] basename via lib/naming.ts instead (same rule as POST /api/publish). Skips (does not overwrite) a key that already exists, mirroring POST /api/publish. Upserts b2_objects on success and returns the CDN URL.',
         security: [{ BearerAuth: [] }],
       },
     },

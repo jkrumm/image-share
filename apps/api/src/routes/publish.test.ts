@@ -8,6 +8,7 @@ import { migrate } from 'drizzle-orm/bun-sqlite/migrator'
 import { Elysia } from 'elysia'
 import * as schema from '../db/schema.js'
 import { env } from '../env.js'
+import { cdnOriginalUrl } from '../lib/cdn.js'
 
 // Isolated :memory: db — see the note in shares.test.ts (same `--isolate`
 // caveat for combined multi-file runs; this file is validated standalone).
@@ -28,7 +29,7 @@ const { setS3 } = await import('../lib/s3.js')
 
 interface PublishResponse {
   published: { id: number; key: string; cdnUrl: string }[]
-  skipped: { id: number; key: string; reason: string }[]
+  skipped: { id: number; key: string; reason: string; cdnUrl?: string }[]
 }
 
 const fixtureDir = join(env.SHARE_ROOT, 'publish-fixtures')
@@ -146,5 +147,91 @@ describe('POST /api/publish', () => {
     expect(body.skipped).toHaveLength(1)
     expect(body.skipped[0]?.reason).toBe('key already exists')
     expect(putCalls).toHaveLength(0)
+  })
+
+  it('mints a random 16-char [a-z0-9] key for an opaque prefix (gen), preserving the extension', async () => {
+    await Bun.write(join(fixtureDir, 'secret.jpg'), new Uint8Array([1, 2, 3]))
+    const id = await seedImage('publish-fixtures/secret.jpg')
+
+    const written: Record<string, Uint8Array> = {}
+    setS3({
+      list: async () => [],
+      exists: async (key) => key in written,
+      put: async (key, data) => {
+        written[key] = data instanceof Uint8Array ? data : new Uint8Array(data as ArrayBuffer)
+      },
+      get: async (key) => {
+        const v = written[key]
+        if (!v) throw new Error('not found')
+        return v
+      },
+      head: async () => null,
+      delete: async (key) => {
+        delete written[key]
+      },
+    })
+
+    const app = new Elysia().use(publishRoutes)
+    const res = await app.handle(
+      new Request('http://localhost/api/publish', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ imageIds: [id], prefix: 'gen' }),
+      }),
+    )
+    const body = (await res.json()) as PublishResponse
+    expect(body.published).toHaveLength(1)
+    const key = body.published[0]?.key ?? ''
+    expect(key).toMatch(/^img\/gen\/[a-z0-9]{16}\.jpg$/)
+    expect(key).not.toContain('secret')
+  })
+
+  it('republishing the same image under the same opaque prefix returns skipped without a duplicate object', async () => {
+    await Bun.write(join(fixtureDir, 'again.jpg'), new Uint8Array([4, 5, 6]))
+    const id = await seedImage('publish-fixtures/again.jpg')
+
+    const written: Record<string, Uint8Array> = {}
+    const putCalls: string[] = []
+    setS3({
+      list: async () => [],
+      exists: async (key) => key in written,
+      put: async (key, data) => {
+        putCalls.push(key)
+        written[key] = data instanceof Uint8Array ? data : new Uint8Array(data as ArrayBuffer)
+      },
+      get: async (key) => {
+        const v = written[key]
+        if (!v) throw new Error('not found')
+        return v
+      },
+      head: async () => null,
+      delete: async (key) => {
+        delete written[key]
+      },
+    })
+
+    const app = new Elysia().use(publishRoutes)
+    const request = () =>
+      app.handle(
+        new Request('http://localhost/api/publish', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ imageIds: [id], prefix: 'misc' }),
+        }),
+      )
+
+    const firstBody = (await (await request()).json()) as PublishResponse
+    expect(firstBody.published).toHaveLength(1)
+    const firstKey = firstBody.published[0]?.key
+    expect(putCalls).toHaveLength(1)
+
+    const secondBody = (await (await request()).json()) as PublishResponse
+    expect(secondBody.published).toHaveLength(0)
+    expect(secondBody.skipped).toHaveLength(1)
+    expect(secondBody.skipped[0]?.key).toBe(firstKey)
+    expect(secondBody.skipped[0]?.reason).toBe('already published under this prefix')
+    expect(secondBody.skipped[0]?.cdnUrl).toBe(cdnOriginalUrl(firstKey ?? ''))
+    // No second B2 write for the republish attempt.
+    expect(putCalls).toHaveLength(1)
   })
 })
