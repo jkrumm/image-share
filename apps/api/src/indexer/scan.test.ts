@@ -241,6 +241,56 @@ describe('indexer scan', () => {
     expect(b2Row[0]?.publishedImageId).toBeNull()
   })
 
+  it('purges rows from a retired root (pre-rework library) and nulls their b2 link', async () => {
+    // Simulate the state a root rename leaves behind: rows written under a root
+    // no scanRoot pass visits. scanRoot only prunes within fuji/raws/share, so
+    // without pruneRetiredRoots these would survive forever and their invalid
+    // `root` would break response-schema validation on the library reads.
+    const staleRow = {
+      root: 'library',
+      relPath: 'legacy/OLD0001.JPG',
+      dir: 'legacy',
+      stem: 'OLD0001',
+      ext: 'jpg',
+      kind: 'jpeg',
+      fileSize: 10,
+      mtimeMs: 1,
+      captureAt: null,
+      orientation: null,
+      rating: null,
+      width: null,
+      height: null,
+      rawPath: null,
+      indexedAt: '2026-01-01T00:00:00.000Z',
+    }
+    const [inserted] = await testDb
+      .insert(images)
+      .values(staleRow as unknown as typeof images.$inferInsert)
+      .returning({ id: images.id })
+    await testDb.insert(b2Objects).values({
+      key: 'img/misc/legacy-old0001.jpg',
+      size: 1,
+      lastModified: '2026-01-01T00:00:00.000Z',
+      publishedImageId: inserted!.id,
+      firstSeenAt: '2026-01-01T00:00:00.000Z',
+    })
+
+    const counts = await runScan()
+    expect(counts.removed).toBeGreaterThanOrEqual(1)
+    expect(getIndexStatus().lastError).toBeNull()
+
+    // The orphaned row is gone...
+    const remaining = await testDb.select().from(images).where(eq(images.id, inserted!.id))
+    expect(remaining[0]).toBeUndefined()
+    // ...and its b2 mirror survives as an out-of-band object, link nulled.
+    const b2Row = await testDb
+      .select()
+      .from(b2Objects)
+      .where(eq(b2Objects.key, 'img/misc/legacy-old0001.jpg'))
+    expect(b2Row[0]).toBeDefined()
+    expect(b2Row[0]?.publishedImageId).toBeNull()
+  })
+
   it('falls back to the filename date pattern when no EXIF/XMP capture date exists', async () => {
     const name = '2025-11-02_08-15-00_hike.jpg'
     await writeJpegFixture(join(fujiRoot, name)) // no captureAt/rating

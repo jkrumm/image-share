@@ -5,7 +5,7 @@
 import type { Dirent } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import { basename, dirname, extname, join } from 'node:path'
-import { and, eq, inArray } from 'drizzle-orm'
+import { and, eq, inArray, notInArray } from 'drizzle-orm'
 import { db as defaultDb, type Db } from '../db/index.js'
 import { b2Objects, images, type NewImageRow } from '../db/schema.js'
 import { env } from '../env.js'
@@ -303,6 +303,37 @@ async function pairRawFiles(): Promise<void> {
   }
 }
 
+// The roots a scan actually walks. Any images row carrying a different `root`
+// is an orphan from a retired root (e.g. the pre-rework 'library' root) and is
+// purged by pruneRetiredRoots below.
+const KNOWN_ROOTS = ['fuji', 'raws', 'share'] as const
+
+/**
+ * Purge rows whose `root` is no longer a configured root. scanRoot only prunes
+ * WITHIN each scanned root (its `existingRows` is filtered to that root), so a
+ * root rename leaves orphaned rows that no scan pass ever visits — and their
+ * now-invalid `root` value breaks response-schema validation on the library
+ * reads. Detaches dependent b2_objects.published_image_id first (the FK is
+ * ON DELETE NO ACTION under foreign_keys=ON), mirroring scanRoot's own
+ * vanished-prune. Predicate-based (no id list) so a full stale index of any
+ * size deletes in one statement, clear of SQLite's bound-variable limit.
+ */
+async function pruneRetiredRoots(counts: ScanCounts): Promise<void> {
+  const retiredImageIds = activeDb
+    .select({ id: images.id })
+    .from(images)
+    .where(notInArray(images.root, KNOWN_ROOTS as unknown as string[]))
+  await activeDb
+    .update(b2Objects)
+    .set({ publishedImageId: null })
+    .where(inArray(b2Objects.publishedImageId, retiredImageIds))
+  const removed = await activeDb
+    .delete(images)
+    .where(notInArray(images.root, KNOWN_ROOTS as unknown as string[]))
+    .returning({ id: images.id })
+  counts.removed += removed.length
+}
+
 /**
  * Run a full reconcile scan across all roots. Single-flight: a concurrent call
  * while `running` returns the last completed counts without starting a second
@@ -324,6 +355,7 @@ export async function runScan(): Promise<ScanCounts> {
     await scanRoot('fuji', roots.fuji, counts)
     await scanRoot('raws', roots.raws, counts)
     await scanRoot('share', roots.share, counts)
+    await pruneRetiredRoots(counts)
     await pairRawFiles()
     status.lastCounts = counts
     status.lastFinishedAt = new Date().toISOString()
