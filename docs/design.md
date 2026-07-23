@@ -92,7 +92,8 @@ b2_objects:  key text pk (full key incl. 'img/' prefix); size int; last_modified
              first_seen_at text
 shares:      id int pk; slug text unique (^[a-z0-9][a-z0-9-]{0,63}$); title text;
              source_type text ('folder'|'selection'); root text? (set iff source_type='folder');
-             dir text? (set iff source_type='folder'); min_rating int?;
+             dir text? (set iff source_type='folder'); recursive int not null default 1
+             (folder shares: include sub-directories of dir); min_rating int?;
              expires_at text?; note text? (markdown); created_at text
 share_images: share_id int fk→shares.id (cascade); image_id int fk→images.id (cascade);
              position int; pk(share_id, image_id); idx(share_id)
@@ -147,8 +148,24 @@ distinguish cases. There is no unlock flow; a request to `/s/:slug/unlock` 404s 
 | `full` | `thumb`, `med`, `full` | original JPEG bytes | paired RAF | original JPEGs + RAFs |
 
 Share content depends on `source_type`:
-- `folder`: images where `root=share.root AND (dir = share.dir OR dir LIKE share.dir || '/%')
-  AND kind='jpeg' AND (min_rating IS NULL OR rating >= min_rating)`, sorted by capture_at.
+- `folder`: images where `root=share.root AND <dir scope> AND kind='jpeg' AND
+  (min_rating IS NULL OR min_rating = 0 OR rating >= min_rating)`, sorted by capture_at. A
+  `min_rating` of 0 means NO filter — `rating` is nullable and `NULL >= 0` is NULL, so applying it
+  literally would silently drop every unrated image (all three admin surfaces send 0 as "any").
+  The dir scope is chosen by `share.recursive` (a share is EITHER a selection OR a folder, and a
+  folder share owns whether it reaches into subfolders):
+  - `recursive=1` (default): `dir = share.dir OR (dir >= share.dir||'/' AND dir < share.dir||'0')` —
+    a half-open range over the subtree (`'/'` 0x2F incremented to `'0'` 0x30); an empty `share.dir`
+    means the whole root. Deliberately NOT `LIKE`: SQLite's `LIKE` is case-insensitive for ASCII and
+    ignores `COLLATE`, so a `LIKE` subtree match would reach into a case-variant sibling directory
+    (`trip/` under a share of `Trip/`) on the case-sensitive Linux filesystem. The range compares
+    BINARY, needs no `%`/`_` escaping, and is sargable so it uses `images_dir_idx` rather than a full
+    scan. The scope builder is `lib/dir-scope.ts dirAtOrBelow`, shared with the admin library browse
+    so the create-share count preview can't diverge from real share membership.
+  - `recursive=0`: `dir = share.dir` exactly — that folder's own images, nothing below it. An empty
+    `share.dir` therefore means the root's immediate children only, not the whole root.
+  One predicate (`folderShareImageFilter`) backs the page listing, the by-id membership check and
+  the admin image count — they must never diverge, or an image the page omits stays fetchable by id.
 - `selection`: images joined through `share_images` on `share_id`, ordered by `position`.
 
 Routes (all under `/s`, public):
@@ -212,7 +229,10 @@ for numeric params, `z.enum` never literal-unions, ISO date strings, `detail` wi
 
 - `GET /api/library/dirs` → `{ data: [{ root, dir, imageCount, ratedCounts: {r4plus…}, rawPairedCount, minCaptureAt, maxCaptureAt }] }`
   (root ∈ `fuji`|`raws`|`share`)
-- `GET /api/library/images?root&dir&recursive&minRating&page&limit&sort=captureAt|name&order` → `{ data: ImageDto[], total }`
+- `GET /api/library/images?root&dir&kind&recursive&minRating&page&limit&sort=captureAt|name&order` → `{ data: ImageDto[], total }`
+  (`recursive` is parsed as a string boolean — `z.coerce.boolean()` would make `recursive=false`
+  true; `kind` and the shared `dirAtOrBelow` scope let the create-share preview match a folder
+  share exactly; `minRating=0` means no filter, as in the share predicate)
 - `GET /api/library/images/:id/file?size=thumb|med|full|orig` — bytes. Accepts bearer header OR
   `?access_token=<API_SECRET>` (browser `<img>` tags; this route only).
 - `POST /api/index/rescan` → 202 `{ started }` · `GET /api/index/status`
@@ -221,11 +241,12 @@ for numeric params, `z.enum` never literal-unions, ISO date strings, `detail` wi
   `SHARE_BASE_URL/<slug>?token=…`) · `GET /api/shares/:id` → the same shape plus `images: ImageDto[]`
   (folder: live-filtered, capture_at ascending; selection: `share_images` in position order) — powers
   the admin share detail page ·
-  `POST /api/shares { slug?, title, note?, expiresAt?, source: {type:'folder', root, dir, minRating?} |
+  `POST /api/shares { slug?, title, note?, expiresAt?, source: {type:'folder', root, dir, recursive?, minRating?} |
   {type:'selection', imageIds} }` — `slug` auto-derives from `title` (lowercased, non-alphanumerics →
   `-`, collapsed/trimmed, `-2`/`-3`… on collision) when omitted; mints one initial token, role=`view` ·
-  `PATCH /api/shares/:id { title?, note?, expiresAt?, minRating?, imageIds? }` (imageIds replaces a
-  selection share's set, position = array order; rejected on a folder share) · `DELETE /api/shares/:id` ·
+  `PATCH /api/shares/:id { title?, note?, expiresAt?, minRating?, recursive?, imageIds? }` (`recursive`
+  is rejected on a selection share; imageIds replaces a selection share's set, position = array order,
+  rejected on a folder share) · `DELETE /api/shares/:id` ·
   `POST /api/shares/:id/roll` → revokes every active token, mints a same-role replacement for each →
   `{ tokens: TokenDto[] }` · `POST /api/shares/:id/tokens { role, label? }` → mints an additional
   non-revoking token → `TokenDto` · `POST /api/shares/:id/tokens/:tokenId/revoke` → revokes exactly
@@ -236,6 +257,14 @@ for numeric params, `z.enum` never literal-unions, ISO date strings, `detail` wi
   `.write('img/<prefix>/<filename>', file)` (skip+report if key exists), upsert b2_objects with
   published_image_id → `{ published: [{ id, key, cdnUrl }] }` where `cdnUrl` comes from `lib/cdn.ts`
   (below) — the single place both this route and `GET /api/b2` mint CDN URLs from.
+- **Opaque-prefix key naming (`lib/naming.ts`)**: since the CDN serves unsigned URLs, `gen`/`misc` get a
+  random 16-char `[a-z0-9]` basename (extension preserved) instead of the file stem — the object name
+  itself is the access control, mirroring the dotfiles `imgcli` tool. `fuji`/`blog` stay stem-based
+  (they're meant to be a browsable, readable gallery). Both `POST /api/publish` and
+  `POST /api/b2/upload` derive keys through this one helper. Because a random name breaks the
+  "skip if key exists" republish guard, `POST /api/publish` instead checks `b2_objects` for a row
+  already published from the same image under the same opaque prefix and reports that in `skipped`
+  (with its existing key/cdnUrl) rather than creating a duplicate object.
 - **CDN URL shape (`lib/cdn.ts`, stage 4 — verified live against the real bucket, not assumed from
   `~/SourceRoot/vps/docs/image-cdn.md` alone)**: `img.jkrumm.com`'s Traefik layer runs an
   `imgproxy-short` `replacepathregex` middleware in front of imgproxy
@@ -330,7 +359,8 @@ buried in Activity.
   thumb via access_token URL), rating filter (Rating component), sort, pagination; lightbox = Modal
   fullScreen with med rendition + prev/next/keyboard; selection mode → actions: "Publish to CDN…"
   (prefix picker modal → notifyPromise), "Create share" (selection share, capture-display order, via
-  `CreateShareModal`); folder toolbar → "Share whole folder" (folder share carrying the active
+  `CreateShareModal`); folder toolbar → "Share this folder" / "Share folder + subfolders" (the label
+  tracks the active subfolders toggle, which the share carries into `recursive` along with the active
   minRating, via the same modal) — hidden for `root='raws'`.
 - **Public** `/public` (stage 4) — a browser for what actually lives on `img.jkrumm.com`, peer of
   Library. Header strip (StatCards): object count, total bytes, not-mirrored count, last reconcile
@@ -347,12 +377,17 @@ buried in Activity.
   `CreateShareModal` in its root/dir-picker mode (the only entry point without ambient folder/selection
   context). `create-share-modal.tsx` asks only for title (autofocus, server-derived slug previewed
   client-side) + an optional markdown note — never re-asks for a folder/selection the caller already
-  resolved.
+  resolved. Its picker mode (no ambient context) additionally offers the same rating + include-subfolders
+  controls the Library toolbar uses. Both modes show a live count summary — from the supplied source's
+  own `recursive`/`minRating`, or (picker mode) from the live form values — computed with the same
+  `kind='jpeg'` + dir scope the share predicate uses, so the number matches what the share will
+  contain; submit is disabled when that count is 0, so a mistyped dir can't mint an empty share.
 - **Shares detail** `/shares/:id` — header (inline-editable title, slug, source line), Links section
   (per-token role badge/label/URL/CopyButton/created date, revoke-with-confirm, a "show revoked" toggle,
   "Add link" via the adapted `add-token-modal.tsx`, "Roll all links" replacing every active token),
   Images section (thumbnail grid; selection shares get a per-tile remove action patching `imageIds`,
-  folder shares are read-only), a collapsed Settings section (note/expiry/minRating via PATCH), and a
+  folder shares are read-only), a collapsed Settings section (note/expiry, plus minRating + an
+  "Include subfolders" toggle on folder shares, via PATCH), and a
   DangerZone delete action navigating back to `/shares`.
 - **Activity** `/activity` — StatCards from /api/stats, index status + "Rescan now". The b2 objects
   table and the reconcile/reverse-backup buttons moved to **Public** (stage 4) — Activity keeps only

@@ -194,11 +194,15 @@ function LibraryPage() {
                     type: 'folder',
                     root: shareableFolder.root,
                     dir: shareableFolder.dir,
+                    // The folder toolbar shares WHAT IS ON SCREEN: the active
+                    // include-subfolders toggle and rating filter both carry
+                    // into the new share (both editable afterwards).
+                    recursive: search.recursive,
                     minRating: search.minRating ?? null,
                   })
                 }
               >
-                Share whole folder
+                {search.recursive ? 'Share folder + subfolders' : 'Share this folder'}
               </Button>
             </Group>
           )}

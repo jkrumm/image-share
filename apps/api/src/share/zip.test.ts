@@ -19,6 +19,7 @@ function shareOf(over: Partial<ShareRow> = {}): ShareRow {
     sourceType: 'folder',
     root: 'fuji',
     dir: SUB,
+    recursive: true,
     minRating: null,
     expiresAt: null,
     note: null,

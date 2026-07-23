@@ -116,6 +116,7 @@ const ShareDto = z.object({
   sourceType: z.enum(['folder', 'selection']),
   root: ShareRootEnum.nullable(),
   dir: z.string().nullable(),
+  recursive: z.boolean().describe('Folder shares: include images in sub-directories of `dir`'),
   minRating: z.number().int().nullable(),
   expiresAt: z.string().nullable(),
   note: z.string().nullable(),
@@ -135,6 +136,7 @@ async function toShareDto(
     sourceType: row.sourceType as z.infer<typeof ShareDto>['sourceType'],
     root: row.root as z.infer<typeof ShareDto>['root'],
     dir: row.dir,
+    recursive: row.recursive,
     minRating: row.minRating,
     expiresAt: row.expiresAt,
     note: row.note,
@@ -152,6 +154,12 @@ const FolderSource = z.object({
   type: z.literal('folder'),
   root: ShareRootEnum,
   dir: z.string(),
+  recursive: z
+    .boolean()
+    .optional()
+    .describe(
+      'Include sub-directories of `dir` (default true). False scopes the share to `dir` itself; with an empty `dir` that means the root’s immediate children only.',
+    ),
   minRating: z.number().int().min(0).max(5).nullable().optional(),
 })
 
@@ -175,6 +183,10 @@ const UpdateShareBody = z.object({
   note: z.string().nullable().optional(),
   expiresAt: ExpiresAtSchema,
   minRating: z.number().int().min(0).max(5).nullable().optional(),
+  recursive: z
+    .boolean()
+    .optional()
+    .describe('Include sub-directories of `dir` — folder shares only'),
   imageIds: z
     .array(z.number().int())
     .optional()
@@ -258,6 +270,7 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
           sourceType: source.type,
           root: source.type === 'folder' ? source.root : null,
           dir: source.type === 'folder' ? source.dir : null,
+          recursive: source.type === 'folder' ? (source.recursive ?? true) : true,
           minRating: source.type === 'folder' ? (source.minRating ?? null) : null,
           expiresAt: body.expiresAt ?? null,
           note: body.note ?? null,
@@ -287,7 +300,7 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
         tags: ['Shares'],
         summary: 'Create a share',
         description:
-          'Creates a folder share (root+dir, optionally minRating-filtered) or a selection share (explicit ordered image ids), and mints the first token with role=view. `slug` auto-derives from `title` (with `-2`/`-3`… on collision) when omitted.',
+          'Creates a folder share (root+dir, optionally non-recursive and minRating-filtered) or a selection share (explicit ordered image ids), and mints the first token with role=view. `slug` auto-derives from `title` (with `-2`/`-3`… on collision) when omitted.',
         security: [{ BearerAuth: [] }],
       },
     },
@@ -301,10 +314,14 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
       if (body.imageIds !== undefined && existing.sourceType !== 'selection') {
         return status(400, 'imageIds can only be set on a selection share')
       }
+      if (body.recursive !== undefined && existing.sourceType !== 'folder') {
+        return status(400, 'recursive can only be set on a folder share')
+      }
 
       const updates: Partial<typeof shares.$inferInsert> = {}
       if (body.title !== undefined) updates.title = body.title
       if (body.minRating !== undefined) updates.minRating = body.minRating
+      if (body.recursive !== undefined) updates.recursive = body.recursive
       if (body.expiresAt !== undefined) updates.expiresAt = body.expiresAt
       if (body.note !== undefined) updates.note = body.note
 
@@ -328,7 +345,7 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
         tags: ['Shares'],
         summary: 'Update a share',
         description:
-          'Partial update of title/note/expiresAt/minRating. `imageIds` replaces a selection share’s image set (position = array order) — rejected on a folder share. Does not manage tokens — see POST /shares/:id/tokens, /roll, and /tokens/:tokenId/revoke.',
+          'Partial update of title/note/expiresAt/minRating/recursive (`recursive` is rejected on a selection share). `imageIds` replaces a selection share’s image set (position = array order) — rejected on a folder share. Does not manage tokens — see POST /shares/:id/tokens, /roll, and /tokens/:tokenId/revoke.',
         security: [{ BearerAuth: [] }],
       },
     },

@@ -1,0 +1,1 @@
+ALTER TABLE `shares` ADD `recursive` integer DEFAULT true NOT NULL;

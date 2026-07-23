@@ -1,5 +1,6 @@
-import { and, asc, eq, gte, isNull, or, sql } from 'drizzle-orm'
+import { and, asc, eq, gte, isNull } from 'drizzle-orm'
 import { db as defaultDb, type Db } from '../db/index.js'
+import { dirAtOrBelow } from './dir-scope.js'
 import {
   images,
   shareImages,
@@ -33,18 +34,33 @@ export function setShareDb(database: Db): void {
 
 /**
  * WHERE predicate for a `source_type='folder'` share's images (design §7):
- * same root, dir at-or-below `share.dir`, kind='jpeg', rating >= min_rating.
- * An empty `share.dir` means the whole root (every dir). The `LIKE` wildcards
- * in the recursive branch are escaped so folder names containing `_`/`%`
- * can't over-match a sibling directory.
+ * same root, kind='jpeg', rating >= min_rating, and a dir scope that depends on
+ * `share.recursive`:
+ *
+ * - `recursive=true` (the default, and the only pre-existing behaviour): dir
+ *   at-or-below `share.dir`; an empty/null `share.dir` means the whole root.
+ *   The subtree match is byte-exact (see lib/dir-scope) so neither a
+ *   case-variant nor a `_`/`%`-matching sibling directory can leak in.
+ * - `recursive=false`: `dir` EXACTLY equal to `share.dir`, i.e. that folder's
+ *   own images and nothing from any sub-directory. An empty/null `share.dir`
+ *   therefore means the root's immediate children only (indexer rows at the
+ *   root have `dir=''`), NOT the whole root.
+ *
+ * This single predicate backs listShareImages, getShareImageById and
+ * shareImageCount — they MUST agree, or an image the page never lists would
+ * still be fetchable by id.
  */
 function folderShareImageFilter(share: ShareRow) {
   const conds = [eq(images.root, share.root as string), eq(images.kind, 'jpeg')]
-  if (share.dir) {
-    const likePattern = share.dir.replace(/([\\%_])/g, '\\$1') + '/%'
-    conds.push(or(eq(images.dir, share.dir), sql`${images.dir} LIKE ${likePattern} ESCAPE '\\'`)!)
+  if (!share.recursive) {
+    conds.push(eq(images.dir, share.dir ?? ''))
+  } else if (share.dir) {
+    conds.push(dirAtOrBelow(share.dir))
   }
-  if (share.minRating != null) {
+  // `minRating: 0` means "no filter", NOT `rating >= 0` — `images.rating` is
+  // NULL for unrated images and `NULL >= 0` is NULL, so the naive predicate
+  // would silently drop every unrated image from the share.
+  if (share.minRating) {
     conds.push(gte(images.rating, share.minRating))
   }
   return and(...conds)

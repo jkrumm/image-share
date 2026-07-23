@@ -1,9 +1,10 @@
 import { Elysia } from 'elysia'
 import { z } from 'zod'
-import { and, asc, count, desc, eq, gte, like, or, sql } from 'drizzle-orm'
+import { and, asc, count, desc, eq, gte, sql } from 'drizzle-orm'
 import { db } from '../db/index.js'
 import { images, type ImageRow } from '../db/schema.js'
 import { env } from '../env.js'
+import { dirAtOrBelow } from '../lib/dir-scope.js'
 import { rootBaseDir, safeJoin } from '../lib/paths.js'
 import { renderRendition } from '../renditions/render.js'
 
@@ -134,16 +135,18 @@ export const libraryRoutes = new Elysia({ name: 'library' })
 
       const conditions = []
       if (query.root) conditions.push(eq(images.root, query.root))
+      if (query.kind) conditions.push(eq(images.kind, query.kind))
       if (query.dir !== undefined) {
         if (query.recursive) {
-          if (query.dir !== '') {
-            conditions.push(or(eq(images.dir, query.dir), like(images.dir, `${query.dir}/%`)))
-          }
+          // Same byte-exact scope builder the folder-share filter uses, so the
+          // create-share count preview matches the share's real membership.
+          if (query.dir !== '') conditions.push(dirAtOrBelow(query.dir))
         } else {
           conditions.push(eq(images.dir, query.dir))
         }
       }
-      if (query.minRating !== undefined) conditions.push(gte(images.rating, query.minRating))
+      // 0 means "no filter" (see folderShareImageFilter — NULL ratings).
+      if (query.minRating) conditions.push(gte(images.rating, query.minRating))
       const where = conditions.length > 0 ? and(...conditions) : undefined
 
       const sortCol = sort === 'name' ? images.stem : images.captureAt
@@ -165,7 +168,10 @@ export const libraryRoutes = new Elysia({ name: 'library' })
       query: z.object({
         root: z.enum(['fuji', 'raws', 'share']).optional(),
         dir: z.string().optional(),
-        recursive: z.coerce.boolean().default(false).optional(),
+        kind: z.enum(['jpeg', 'raw', 'image', 'other']).optional(),
+        // NOT z.coerce.boolean(): query params arrive as strings and
+        // `Boolean('false')` is true, which made `?recursive=false` recursive.
+        recursive: z.stringbool().default(false).optional(),
         minRating: z.coerce.number().int().min(0).max(5).optional(),
         page: z.coerce.number().int().min(1).default(1).optional(),
         limit: z.coerce.number().int().min(1).max(200).default(50).optional(),
@@ -177,7 +183,7 @@ export const libraryRoutes = new Elysia({ name: 'library' })
         tags: ['Library'],
         summary: 'List images in a folder',
         description:
-          'Paginated image list filtered by root/dir (optionally recursive) and minimum rating, sorted by capture date or filename. `total` is the unfiltered-by-pagination count. Fetch bytes via GET /library/images/{id}/file.',
+          'Paginated image list filtered by root/dir (optionally recursive), kind and minimum rating (0 = no filter), sorted by capture date or filename. `total` is the unfiltered-by-pagination count. Fetch bytes via GET /library/images/{id}/file.',
         security: [{ BearerAuth: [] }],
       },
     },

@@ -73,6 +73,8 @@ interface ShareDto {
   sourceType: string
   root: string | null
   dir: string | null
+  recursive: boolean
+  minRating: number | null
   imageCount: number
   tokens: TokenDto[]
 }
@@ -119,6 +121,23 @@ describe('POST /api/shares — folder + selection creation', () => {
     expect(res.status).toBe(201)
     const body = (await res.json()) as ShareDto
     expect(body.slug).toBe('summer-trip-2026-2')
+  })
+
+  it('defaults recursive to true and persists an explicit recursive/minRating', async () => {
+    const def = (await (
+      await post({ title: 'Default scope', source: folderSource })
+    ).json()) as ShareDto
+    expect(def.recursive).toBe(true)
+    expect(def.minRating).toBeNull()
+
+    const res = await post({
+      title: 'Flat scope',
+      source: { ...folderSource, recursive: false, minRating: 3 },
+    })
+    expect(res.status).toBe(201)
+    const body = (await res.json()) as ShareDto
+    expect(body.recursive).toBe(false)
+    expect(body.minRating).toBe(3)
   })
 
   it('creates a selection share and populates share_images', async () => {
@@ -243,6 +262,39 @@ describe('PATCH /api/shares/:id', () => {
     expect(body.note).toBe('friends album')
     expect(body.minRating).toBe(4)
     expect(body.title).toBe('patch-me') // unchanged field survives partial update
+  })
+
+  it('toggles recursive on a folder share', async () => {
+    const created = (await (
+      await post({ title: 'toggle-scope', source: folderSource })
+    ).json()) as ShareDto
+    expect(created.recursive).toBe(true)
+
+    const res = await buildApp().handle(
+      new Request(`http://localhost/api/shares/${created.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ recursive: false }),
+      }),
+    )
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as ShareDto).recursive).toBe(false)
+  })
+
+  it('rejects recursive on a selection share', async () => {
+    const a = await seedImage('scope-a.jpg')
+    const created = (await (
+      await post({ title: 'selection-not-folder', source: { type: 'selection', imageIds: [a] } })
+    ).json()) as ShareDto
+
+    const res = await buildApp().handle(
+      new Request(`http://localhost/api/shares/${created.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ recursive: false }),
+      }),
+    )
+    expect(res.status).toBe(400)
   })
 
   it('rejects imageIds on a folder share', async () => {

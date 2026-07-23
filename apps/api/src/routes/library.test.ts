@@ -103,3 +103,67 @@ describe('GET /api/library/images/:id/file', () => {
     expect(bytes).toEqual(new Uint8Array([1, 2, 3, 4]))
   })
 })
+
+describe('GET /api/library/images ?recursive', () => {
+  // `z.coerce.boolean()` made `?recursive=false` recursive (Boolean('false') is
+  // true), so the Library grid and the create-share count preview were always
+  // recursive regardless of the toggle.
+  async function seedDir(root: string, dir: string, stem: string): Promise<number> {
+    const now = new Date().toISOString()
+    const [row] = await testDb
+      .insert(schema.images)
+      .values({
+        root,
+        relPath: `${dir}/${stem}.jpg`,
+        dir,
+        stem,
+        ext: 'jpg',
+        kind: 'jpeg',
+        fileSize: 1,
+        mtimeMs: 1,
+        captureAt: null,
+        orientation: null,
+        rating: null,
+        width: null,
+        height: null,
+        rawPath: null,
+        indexedAt: now,
+      })
+      .returning({ id: schema.images.id })
+    if (!row) throw new Error('seed failed')
+    return row.id
+  }
+
+  async function list(qs: string) {
+    const res = await buildApp().handle(
+      new Request(`http://localhost/api/library/images?${qs}`, {
+        headers: { authorization: `Bearer ${env.API_SECRET}` },
+      }),
+    )
+    expect(res.status).toBe(200)
+    return (await res.json()) as { data: { id: number }[]; total: number }
+  }
+
+  it('honours recursive=false and recursive=true', async () => {
+    const top = await seedDir('raws', 'rec-test', 'top')
+    const sub = await seedDir('raws', 'rec-test/day1', 'sub')
+
+    const flat = await list('root=raws&dir=rec-test&recursive=false')
+    expect(flat.data.map((r) => r.id)).toEqual([top])
+    expect(flat.total).toBe(1)
+
+    const deep = await list('root=raws&dir=rec-test&recursive=true')
+    expect(deep.total).toBe(2)
+    expect(deep.data.map((r) => r.id).toSorted()).toEqual([top, sub].toSorted())
+  })
+
+  it('matches the folder-share dir scope: no case-variant or wildcard siblings', async () => {
+    const mine = await seedDir('raws', 'Scope_1/sub', 'mine')
+    await seedDir('raws', 'scope_1/sub', 'othercase')
+    await seedDir('raws', 'ScopeX1/sub', 'wildcard')
+
+    const res = await list('root=raws&dir=Scope_1&recursive=true')
+    expect(res.data.map((r) => r.id)).toEqual([mine])
+    expect(res.total).toBe(1)
+  })
+})

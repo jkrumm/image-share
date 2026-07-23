@@ -52,9 +52,9 @@ export const b2Objects = sqliteTable('b2_objects', {
 
 // ── shares ─────────────────────────────────────────────────────────────────
 // A shared folder OR a hand-picked selection of images (design §7). NOT
-// rebuildable — snapshotted nightly. `root`/`dir` are only set when
-// `source_type='folder'`; a `source_type='selection'` share's content lives in
-// `share_images` instead.
+// rebuildable — snapshotted nightly. `root`/`dir`/`recursive` are only
+// meaningful when `source_type='folder'`; a `source_type='selection'` share's
+// content lives in `share_images` instead.
 export const shares = sqliteTable('shares', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   slug: text('slug').notNull().unique(), // ^[a-z0-9][a-z0-9-]{0,63}$
@@ -62,6 +62,9 @@ export const shares = sqliteTable('shares', {
   sourceType: text('source_type').notNull(), // 'folder' | 'selection'
   root: text('root'), // set only when source_type='folder'
   dir: text('dir'), // set only when source_type='folder'
+  // Folder shares only: include images in sub-directories of `dir`. Defaults
+  // to true so pre-existing rows keep the old unconditionally-recursive meaning.
+  recursive: integer('recursive', { mode: 'boolean' }).notNull().default(true),
   minRating: integer('min_rating'),
   expiresAt: text('expires_at'), // ISO 8601, nullable
   note: text('note'), // markdown

@@ -26,6 +26,8 @@ export type ShareDto = {
   sourceType: 'folder' | 'selection'
   root: ShareRoot | null
   dir: string | null
+  /** Folder shares: include images in sub-directories of `dir`. */
+  recursive: boolean
   minRating: number | null
   expiresAt: string | null
   note: string | null
@@ -37,7 +39,13 @@ export type ShareDto = {
 export type ShareDetailDto = ShareDto & { images: ImageDto[] }
 
 export type ShareSourceInput =
-  | { type: 'folder'; root: ShareRoot; dir: string; minRating?: number | null }
+  | {
+      type: 'folder'
+      root: ShareRoot
+      dir: string
+      recursive?: boolean
+      minRating?: number | null
+    }
   | { type: 'selection'; imageIds: number[] }
 
 export type CreateShareInput = {
@@ -54,6 +62,7 @@ export type UpdateShareInput = {
   note?: string | null
   expiresAt?: string | null
   minRating?: number | null
+  recursive?: boolean
   imageIds?: number[]
 }
 

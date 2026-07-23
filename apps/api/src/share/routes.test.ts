@@ -76,6 +76,7 @@ async function seedImage(over: Partial<typeof images.$inferInsert> = {}): Promis
 
 let imageId: number
 let pairedImageId: number
+let subImageId: number
 const OPAQUE = render404Page()
 
 beforeAll(async () => {
@@ -94,6 +95,14 @@ beforeAll(async () => {
     .jpeg()
     .toFile(join(fujiBase, SUB, 'paired.jpg'))
   writeFileSync(join(rawsBase, SUB, 'paired.RAF'), Buffer.alloc(32, 0x33))
+  // Sub-directory image — real bytes so the recursive `gallery` share (which
+  // legitimately contains it) can still render and zip it.
+  mkdirSync(join(fujiBase, SUB, 'sub'), { recursive: true })
+  await sharp({
+    create: { width: 40, height: 30, channels: 3, background: { r: 70, g: 80, b: 90 } },
+  })
+    .jpeg()
+    .toFile(join(fujiBase, SUB, 'sub', 'nested.jpg'))
 
   const created = createDb(':memory:')
   db = created.db
@@ -115,6 +124,16 @@ beforeAll(async () => {
 
   const expId = await seedShare({ slug: 'expired', expiresAt: '2000-01-01T00:00:00.000Z' })
   await seedToken(expId, 'et', 'full')
+
+  // A non-recursive folder share over the same dir: the sub-directory image
+  // below must be neither listed nor reachable by id.
+  subImageId = await seedImage({
+    relPath: `${SUB}/sub/nested.jpg`,
+    dir: `${SUB}/sub`,
+    stem: 'nested',
+  })
+  const flatId = await seedShare({ slug: 'flat', recursive: false })
+  await seedToken(flatId, 'flat-tk', 'full')
 })
 
 afterAll(() => {
@@ -164,6 +183,27 @@ describe('GET /s/:slug (page)', () => {
       expect(res.status).toBe(404)
       expect(await res.text()).toBe(OPAQUE)
     }
+  })
+})
+
+describe('non-recursive folder share', () => {
+  it('omits sub-directory images from the page', async () => {
+    const html = await (await get('/s/flat?token=flat-tk')).text()
+    expect(html).toContain(`/s/flat/img/${imageId}?size=thumb&amp;token=flat-tk`)
+    expect(html).not.toContain(`/s/flat/img/${subImageId}?`)
+  })
+
+  it('404s a sub-directory image by id — the asset routes agree with the page', async () => {
+    for (const path of [
+      `/s/flat/img/${subImageId}?token=flat-tk&size=med`,
+      `/s/flat/file/${subImageId}?token=flat-tk`,
+    ]) {
+      const res = await get(path)
+      expect(res.status).toBe(404)
+      expect(await res.text()).toBe(OPAQUE)
+    }
+    // Control: the same token reaches an image that IS in the share.
+    expect((await get(`/s/flat/img/${imageId}?token=flat-tk&size=med`)).status).toBe(200)
   })
 })
 

@@ -161,6 +161,120 @@ describe('listShareImages + getShareImageById (folder source)', () => {
     expect(await getShareImageById(share, siblingId)).toBeNull()
     expect(await shareImageCount(share)).toBe(2)
   })
+
+  it('excludes sub-directory images when recursive=false', async () => {
+    const id = await seedShare({ slug: 'flat', dir: 'flat-trip', recursive: false })
+    await seedToken(id, 'ft')
+    const inTop = await seedImage({
+      root: 'fuji',
+      relPath: 'flat-trip/a.jpg',
+      dir: 'flat-trip',
+      rating: 5,
+      captureAt: '2026-07-01',
+    })
+    const inSub = await seedImage({
+      root: 'fuji',
+      relPath: 'flat-trip/day1/b.jpg',
+      dir: 'flat-trip/day1',
+      rating: 5,
+      captureAt: '2026-07-02',
+    })
+
+    const access = await resolveShareAccess({ slug: 'flat', token: 'ft' })
+    const share = access!.share
+    expect((await listShareImages(share)).map((r) => r.id)).toEqual([inTop])
+    expect(await shareImageCount(share)).toBe(1)
+    // The id-membership check MUST agree with the listing, or an image the page
+    // never renders would still be fetchable by id.
+    expect((await getShareImageById(share, inTop))?.id).toBe(inTop)
+    expect(await getShareImageById(share, inSub)).toBeNull()
+  })
+
+  it('does not reach into a case-variant or wildcard-matching sibling directory', async () => {
+    // The subtree match used to be `dir LIKE 'Case/%'`. SQLite's LIKE is
+    // case-insensitive for ASCII (and COLLATE has no effect on it), so on the
+    // case-sensitive Linux filesystem the share silently swallowed `case/...`.
+    // `_` was also a LIKE wildcard, so `Case_1/` over-matched `CaseX1/`.
+    const id = await seedShare({ slug: 'case', dir: 'Case_1', recursive: true })
+    await seedToken(id, 'cs')
+    const mine = await seedImage({
+      root: 'fuji',
+      relPath: 'Case_1/sub/a.jpg',
+      dir: 'Case_1/sub',
+      captureAt: '2026-09-01',
+    })
+    const otherCase = await seedImage({
+      root: 'fuji',
+      relPath: 'case_1/sub/private.jpg',
+      dir: 'case_1/sub',
+      captureAt: '2026-09-02',
+    })
+    const wildcard = await seedImage({
+      root: 'fuji',
+      relPath: 'CaseX1/sub/private.jpg',
+      dir: 'CaseX1/sub',
+      captureAt: '2026-09-03',
+    })
+
+    const share = (await resolveShareAccess({ slug: 'case', token: 'cs' }))!.share
+    expect((await listShareImages(share)).map((r) => r.id)).toEqual([mine])
+    expect(await shareImageCount(share)).toBe(1)
+    // The id-membership check must agree, or the bytes stay fetchable by id.
+    expect(await getShareImageById(share, otherCase)).toBeNull()
+    expect(await getShareImageById(share, wildcard)).toBeNull()
+  })
+
+  it('treats minRating 0 as "no filter", keeping unrated (NULL) images', async () => {
+    // `rating >= 0` is NULL for an unrated image, so a stored 0 would silently
+    // drop every unrated photo from the share.
+    const id = await seedShare({ slug: 'zero-rating', dir: 'zr', minRating: 0 })
+    await seedToken(id, 'zr')
+    const unrated = await seedImage({
+      root: 'fuji',
+      relPath: 'zr/a.jpg',
+      dir: 'zr',
+      rating: null,
+      captureAt: '2026-10-01',
+    })
+    const rated = await seedImage({
+      root: 'fuji',
+      relPath: 'zr/b.jpg',
+      dir: 'zr',
+      rating: 3,
+      captureAt: '2026-10-02',
+    })
+
+    const share = (await resolveShareAccess({ slug: 'zero-rating', token: 'zr' }))!.share
+    expect((await listShareImages(share)).map((r) => r.id)).toEqual([unrated, rated])
+    expect(await shareImageCount(share)).toBe(2)
+    expect((await getShareImageById(share, unrated))?.id).toBe(unrated)
+  })
+
+  it('recursive=false with an empty dir scopes to the root’s immediate children', async () => {
+    const id = await seedShare({ slug: 'root-flat', dir: '', recursive: false })
+    await seedToken(id, 'rft')
+    const atRoot = await seedImage({
+      root: 'fuji',
+      relPath: 'root-a.jpg',
+      dir: '',
+      rating: 5,
+      captureAt: '2026-08-01',
+    })
+    const nested = await seedImage({
+      root: 'fuji',
+      relPath: 'nested/root-b.jpg',
+      dir: 'nested',
+      rating: 5,
+      captureAt: '2026-08-02',
+    })
+
+    const access = await resolveShareAccess({ slug: 'root-flat', token: 'rft' })
+    const share = access!.share
+    const ids = (await listShareImages(share)).map((r) => r.id)
+    expect(ids).toContain(atRoot)
+    expect(ids).not.toContain(nested)
+    expect(await getShareImageById(share, nested)).toBeNull()
+  })
 })
 
 describe('listShareImages + getShareImageById (selection source)', () => {

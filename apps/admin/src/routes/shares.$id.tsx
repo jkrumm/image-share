@@ -52,7 +52,7 @@ function sourceLine(share: ShareDetailDto): string {
     return `Selection · ${share.images.length} image${share.images.length === 1 ? '' : 's'}`
   }
   const label = share.dir ? `${share.root}/${share.dir}` : share.root
-  return `Folder ${label} (incl. subfolders)`
+  return `Folder ${label} ${share.recursive ? '(incl. subfolders)' : '(this folder only)'}`
 }
 
 function ShareDetailPage() {
@@ -362,6 +362,7 @@ const SettingsFormSchema = z.object({
   note: z.string(),
   expiresAt: z.string(),
   minRating: z.union([z.number().int().min(0).max(5), z.literal('')]),
+  recursive: z.boolean(),
 })
 
 type SettingsFormValues = z.infer<typeof SettingsFormSchema>
@@ -373,6 +374,7 @@ function ShareSettingsForm({ share }: { share: ShareDetailDto }) {
       note: share.note ?? '',
       expiresAt: share.expiresAt ?? '',
       minRating: share.minRating ?? '',
+      recursive: share.recursive,
     },
     schema: SettingsFormSchema,
     mode: 'controlled',
@@ -384,8 +386,16 @@ function ShareSettingsForm({ share }: { share: ShareDetailDto }) {
         id: share.id,
         note: values.note === '' ? null : values.note,
         expiresAt: values.expiresAt === '' ? null : values.expiresAt,
+        // Both are folder-only server-side (PATCH rejects `recursive` on a
+        // selection share), so only send them for a folder share.
         ...(share.sourceType === 'folder'
-          ? { minRating: values.minRating === '' ? null : values.minRating }
+          ? {
+              // 0 is "no filter", same as the create modal — storing a literal
+              // 0 would mean `rating >= 0`, which drops every unrated image.
+              minRating:
+                values.minRating === '' || values.minRating === 0 ? null : values.minRating,
+              recursive: values.recursive,
+            }
           : {}),
       }),
       { loading: 'Saving settings…', success: 'Settings saved', error: 'Could not save settings' },
@@ -410,13 +420,22 @@ function ShareSettingsForm({ share }: { share: ShareDetailDto }) {
           {...field(form, 'expiresAt')}
         />
         {share.sourceType === 'folder' && (
-          <NumberInput
-            label="Minimum rating"
-            placeholder="Any"
-            min={0}
-            max={5}
-            {...field(form, 'minRating')}
-          />
+          <>
+            <NumberInput
+              label="Minimum rating"
+              placeholder="Any"
+              description="Empty or 0 means no filter"
+              min={0}
+              max={5}
+              {...field(form, 'minRating')}
+            />
+            <Checkbox
+              label="Include subfolders"
+              description="Off shares only the images directly in this folder"
+              checked={form.values.recursive}
+              onChange={(e) => form.setFieldValue('recursive', e.currentTarget.checked)}
+            />
+          </>
         )}
         <Group>
           <Button type="submit" size="xs" loading={updateShare.isPending}>

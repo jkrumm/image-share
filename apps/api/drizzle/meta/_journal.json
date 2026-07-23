@@ -15,6 +15,13 @@
       "when": 1784699851176,
       "tag": "0001_glorious_ironclad",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1784707535425,
+      "tag": "0002_regular_silhouette",
+      "breakpoints": true
     }
   ]
 }

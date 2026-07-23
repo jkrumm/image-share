@@ -11,6 +11,7 @@ function makeShare(overrides: Partial<ShareRow> = {}): ShareRow {
     sourceType: 'folder',
     root: 'fuji',
     dir: 'mallorca-2026',
+    recursive: true,
     minRating: null,
     expiresAt: null,
     note: null,

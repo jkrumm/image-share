@@ -37,6 +37,7 @@ export type DirDto = {
 export type LibraryImagesParams = {
   root?: LibraryRoot
   dir?: string
+  kind?: ImageKind
   recursive?: boolean
   minRating?: number
   page?: number
