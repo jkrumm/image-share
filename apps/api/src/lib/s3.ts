@@ -64,8 +64,23 @@ export function createBunS3(): S3Port {
       return results
     },
 
-    exists(key) {
-      return bucket.exists(key)
+    // Deliberately routed through stat() rather than Bun's bucket.exists().
+    // Our B2 application key is scoped to the `img/` prefix, and B2 answers a
+    // HEAD for a MISSING object under a prefix-restricted key with 403, not
+    // 404 — so bucket.exists() throws S3Error instead of returning false, and
+    // every upload of a NEW key 500s while an existing key answers fine.
+    // (`exists` on an existing key worked; only the miss path was broken,
+    // which is why gen/misc publishes — opaque names, skip the check — never
+    // caught it.) stat() cannot distinguish "absent" from "genuinely
+    // forbidden" here, so both collapse to false: with a prefix-scoped key a
+    // real permission failure surfaces on the subsequent put() anyway.
+    async exists(key) {
+      try {
+        await bucket.stat(key)
+        return true
+      } catch {
+        return false
+      }
     },
 
     async put(key, data) {
