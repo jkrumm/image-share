@@ -229,12 +229,22 @@ for numeric params, `z.enum` never literal-unions, ISO date strings, `detail` wi
 
 - `GET /api/library/dirs` → `{ data: [{ root, dir, imageCount, ratedCounts: {r4plus…}, rawPairedCount, minCaptureAt, maxCaptureAt }] }`
   (root ∈ `fuji`|`raws`|`share`)
-- `GET /api/library/images?root&dir&kind&recursive&minRating&page&limit&sort=captureAt|name&order` → `{ data: ImageDto[], total }`
+- `GET /api/library/images?root&dir&kind&recursive&minRating&stem&page&limit&sort=captureAt|name&order` → `{ data: ImageDto[], total }`
   (`recursive` is parsed as a string boolean — `z.coerce.boolean()` would make `recursive=false`
   true; `kind` and the shared `dirAtOrBelow` scope let the create-share preview match a folder
-  share exactly; `minRating=0` means no filter, as in the share predicate)
+  share exactly; `minRating=0` means no filter, as in the share predicate; `stem` is a
+  case-insensitive substring match against the filename stem — a plain `LIKE` already satisfies
+  "case-insensitive" since SQLite's `LIKE` is ASCII case-insensitive by default, same as the b2
+  `prefix`/`q` filters below)
 - `GET /api/library/images/:id/file?size=thumb|med|full|orig` — bytes. Accepts bearer header OR
   `?access_token=<API_SECRET>` (browser `<img>` tags; this route only).
+- `DELETE /api/images/:id` — deletes an image. Only `root='share'` images may be deleted (403 on
+  `fuji`/`raws`, which are read-only source trees); 404 on an unknown id. Removes the file under
+  `SHARE_ROOT`, its cached renditions (all three sizes, by recomputing the content-addressed cache
+  key from the row's identity — design §6), and the `images` row. `share_images` rows referencing it
+  cascade automatically (schema FK). `b2_objects.published_image_id` has no cascading FK — if the
+  image was published, its `b2_objects` row is kept and only `published_image_id` is nulled; the B2
+  object itself is never deleted by this route (that stays `DELETE /api/b2/:key`'s job).
 - `POST /api/index/rescan` → 202 `{ started }` · `GET /api/index/status`
 - Shares (role-based rework, stage 1; admin-UX rework, stage 2): `GET /api/shares` (each with tokens
   `{id, role, label, url, createdAt, revokedAt}` + `imageCount` + minted URLs
@@ -252,7 +262,18 @@ for numeric params, `z.enum` never literal-unions, ISO date strings, `detail` wi
   non-revoking token → `TokenDto` · `POST /api/shares/:id/tokens/:tokenId/revoke` → revokes exactly
   that token → `TokenDto`.
 - `POST /api/images` multipart `{ file, dir? }` → saves to `SHARE_ROOT/<yyyy>/<mm>/` (collision-safe name),
-  indexes immediately (`root='share'`) → 201 `{ id, root, relPath, adminFileUrl }`
+  indexes immediately (`root='share'`) → 201 `{ id, root, relPath, adminFileUrl }`. Rejects (400)
+  before writing anything to disk: an extension outside the indexer's recognized set (`EXT_KIND` —
+  `jpg`/`jpeg`/`png`/`webp`/`avif`/`heic`/`raf`, indexer/scan.ts), a declared MIME type outside the
+  matching allowlist (`CONTENT_TYPE_BY_EXT`, library.ts), or a file over 50 MB. The MIME check is
+  documented dead weight in the current runtime: Bun's multipart parser re-derives `File#type` from
+  the filename extension rather than the wire `Content-Type` header (verified live — a raw multipart
+  part declaring `Content-Type: application/pdf` on a `sneaky.jpg` field still yields
+  `type: "image/jpeg"` in the handler), so the client's declared MIME can never actually disagree
+  with the extension today. Kept as defense-in-depth against a future parser change; the extension
+  check is the real gate. Without the upfront check, an unsupported extension would still write the
+  file to `SHARE_ROOT` and only then fail in `indexSinglePath`, orphaning it on disk — the up-front
+  reject avoids that.
 - `POST /api/publish` `{ imageIds: number[], prefix: 'fuji'|'blog'|'gen'|'misc' }` → for each: Bun.S3Client
   `.write('img/<prefix>/<filename>', file)` (skip+report if key exists), upsert b2_objects with
   published_image_id → `{ published: [{ id, key, cdnUrl }] }` where `cdnUrl` comes from `lib/cdn.ts`
@@ -274,14 +295,15 @@ for numeric params, `z.enum` never literal-unions, ISO date strings, `detail` wi
   already emitted pre-stage-4 and it was correct). `cdnThumbUrl(key, width)` →
   `${CDN_BASE}/rs:fit:<width>/<key minus img/ prefix>` (confirmed live to serve a resized rendition,
   longest side bounded to `width`).
-- `GET /api/b2?prefix=all|fuji|blog|gen|misc&page&limit&sort=lastModified|key|size&order` → b2_objects
+- `GET /api/b2?prefix=all|fuji|blog|gen|misc&q&page&limit&sort=lastModified|key|size&order` → b2_objects
   `{ data: [{ ...row, mirrored, publishedImageId, cdnUrl, thumbUrl }], total, totalBytes,
-  unmirroredCount, lastReconcileAt }` — `total` is filtered by `prefix`/paginated; `totalBytes`,
-  `unmirroredCount`, and `lastReconcileAt` are always bucket-wide (ignore the filter) so the admin
-  Public page's header strip reads consistently regardless of the active filter. `thumbUrl` uses a
-  480px width (matches the renditions 'thumb' size, design §6). `lastReconcileAt` comes from an
-  in-memory status object in `cron/b2-reconcile.ts` (mirrors the indexer's status pattern, design §5)
-  — not persisted, resets on restart.
+  unmirroredCount, lastReconcileAt }` — `total` is filtered by `prefix`/`q`/paginated; `totalBytes`,
+  `unmirroredCount`, and `lastReconcileAt` are always bucket-wide (ignore both filters) so the admin
+  Public page's header strip reads consistently regardless of the active filter. `q` is a
+  case-insensitive substring match against the object key (same ASCII-`LIKE` reasoning as the
+  library `stem` filter above). `thumbUrl` uses a 480px width (matches the renditions 'thumb' size,
+  design §6). `lastReconcileAt` comes from an in-memory status object in `cron/b2-reconcile.ts`
+  (mirrors the indexer's status pattern, design §5) — not persisted, resets on restart.
 - `POST /api/b2/upload` multipart `{ file, prefix: 'fuji'|'blog'|'gen'|'misc' }` → uploads straight to
   B2 under `img/<prefix>/<sanitized filename>` (never touches a local disk root), skips (does not
   overwrite) a pre-existing key, upserts b2_objects on success → `{ uploaded, key, cdnUrl, reason? }`.
@@ -321,21 +343,34 @@ Errors: throw + bubble; guard throws `status(401)`; share routes catch-all → t
   networks `[cloudflared]`; mem limit 1G; healthcheck curl `/health` (port 7720); labels: glance
   (`glance.name: Image Share`, `si:imgproxy`… pick a sensible simpleicon, `glance.url: https://share.jkrumm.com/admin`),
   `com.centurylinklabs.watchtower.enable: 'false'` (local build).
-  Volumes: `/home/jkrumm/ssd/SSD/Bilder:/photos/library:ro`, `/mnt/hdd/fuji/RAWs:/photos/raws:ro`,
-  `/home/jkrumm/ssd/SSD/Bilder/Uploads:/photos/uploads`, `/home/jkrumm/ssd/SSD/Bilder/B2-Mirror:/photos/b2-mirror`,
+  Volumes (as shipped, `~/SourceRoot/homelab/docker-compose.yml`): `/home/jkrumm/ssd/SSD/Bilder/Fuji:/photos/fuji:ro`,
+  `/mnt/hdd/fuji/RAWs:/photos/raws:ro`, `/home/jkrumm/ssd/SSD/Bilder/ImageShare:/photos/share` (rw —
+  service-owned, no `:ro`), `/home/jkrumm/ssd/SSD/Bilder/B2-Mirror:/photos/b2-mirror`,
   `/home/jkrumm/ssd/image-share:/data`, `/home/jkrumm/ssd/SSD/Dev/image-share:/backup`, `/etc/localtime:/etc/localtime:ro`.
-  Env: `API_SECRET=${IMAGE_SHARE_API_SECRET}`, B2 five-pack (reuse `${IMGCLI-style}` refs from
-  op://common/b2-images-write + op://common/backblaze-s3), `SHARE_BASE_URL=https://share.jkrumm.com`,
+  Env: `API_SECRET=${IMAGE_SHARE_API_SECRET}`, `FUJI_ROOT`/`RAWS_ROOT`/`SHARE_ROOT`/`B2_MIRROR_DIR`/`DATA_DIR`/`SNAPSHOT_DIR`
+  set to the container paths above (must match the mounts — see env.ts, design §3), the B2 five-pack
+  (`B2_ENDPOINT`/`B2_REGION`/`B2_BUCKET`/`B2_KEY_ID`/`B2_APP_KEY` — exact env var names env.ts reads;
+  see the credential note below), `SHARE_BASE_URL=https://share.jkrumm.com`,
   `CDN_BASE=https://img.jkrumm.com`, `OTEL_EXPORTER_OTLP_ENDPOINT=` (empty until ClickStack exists on homelab —
   homelab agent verifies; if no clickstack container there, leave unset), `TZ=Europe/Berlin`.
+- **B2 credential note (scoped-key migration)**: `B2_KEY_ID`/`B2_APP_KEY` move from the shared
+  `op://common/b2-images-write` key to a dedicated, service-scoped key at
+  `op://homelab/image-share/{B2_KEY_ID,B2_APP_KEY}` — capabilities `listFiles`/`readFiles`/`writeFiles`/`deleteFiles`,
+  `namePrefix: img/`. This is what makes `DELETE /api/b2/:key` actually functional: the shared
+  `b2-images-write` key lacks `deleteFiles`, so today that route can only 500 when it reaches
+  `S3Port.delete`. `B2_ENDPOINT`/`B2_REGION`/`B2_BUCKET` are non-secret bucket config, unaffected,
+  and stay on the shared `op://common/backblaze-s3` refs.
 - Caddyfile: single `share.jkrumm.com` site block — plain `reverse_proxy image-share:7720`
   handles for `/health`, `/api/*`, `/openapi*`, `/admin*`, `/s/*`, then a catch-all handle with
   `rewrite * /s{uri}` + `reverse_proxy` for the friend share slugs.
-- `.env.tpl`: `IMAGE_SHARE_API_SECRET=op://homelab/image-share/API_SECRET` + B2 refs.
+- `.env.tpl`: `IMAGE_SHARE_API_SECRET=op://homelab/image-share/API_SECRET`,
+  `IMAGE_SHARE_B2_KEY_ID=op://homelab/image-share/B2_KEY_ID`,
+  `IMAGE_SHARE_B2_APP_KEY=op://homelab/image-share/B2_APP_KEY`,
+  `IMAGE_SHARE_B2_ENDPOINT`/`IMAGE_SHARE_B2_REGION`/`IMAGE_SHARE_B2_BUCKET=op://common/backblaze-s3/{ENDPOINT,REGION,BUCKET}`.
 - Makefile: `image-share-deploy` (pull ~/image-share + build --no-cache + up -d), `-restart`, `-logs`.
 - uptime-kuma monitors.yaml: Image Share subgroup — docker monitor + `https://share.jkrumm.com/health`
   (cloudflare_bypass).
-- restic: NO changes (Uploads/B2-Mirror land inside the Bilder source; live DB + renditions live
+- restic: NO changes (ImageShare/B2-Mirror land inside the Bilder source; live DB + renditions live
   outside all sources; snapshots land in the Dev source).
 - Dockerfile: `oven/bun:1.3` (Debian, NOT alpine — perl + glibc sharp prebuilds), two-stage:
   builder installs workspaces + `vite build` admin; runner: `apt-get install -y curl perl libjemalloc2`,

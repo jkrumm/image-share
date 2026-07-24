@@ -1,7 +1,7 @@
 import { basename, extname } from 'node:path'
 import { Elysia } from 'elysia'
 import { z } from 'zod'
-import { asc, count, desc, eq, isNull, like, sql } from 'drizzle-orm'
+import { and, asc, count, desc, eq, isNull, like, sql } from 'drizzle-orm'
 import { getB2ReconcileStatus, runB2Reconcile } from '../cron/b2-reconcile.js'
 import { runReverseBackup } from '../cron/reverse-backup.js'
 import { db } from '../db/index.js'
@@ -60,10 +60,14 @@ export const b2Routes = new Elysia({ name: 'b2' })
       const order = query.order ?? 'desc'
       const offset = (page - 1) * limit
 
-      const where =
-        query.prefix && query.prefix !== 'all'
-          ? like(b2Objects.key, `${env.B2_PREFIX}${query.prefix}/%`)
-          : undefined
+      const conditions = []
+      if (query.prefix && query.prefix !== 'all') {
+        conditions.push(like(b2Objects.key, `${env.B2_PREFIX}${query.prefix}/%`))
+      }
+      // SQLite's LIKE is case-insensitive for ASCII by default (design §7), so
+      // a plain substring pattern already satisfies "case-insensitive".
+      if (query.q) conditions.push(like(b2Objects.key, `%${query.q}%`))
+      const where = conditions.length > 0 ? and(...conditions) : undefined
 
       const sortCol =
         sort === 'key' ? b2Objects.key : sort === 'size' ? b2Objects.size : b2Objects.lastModified
@@ -105,6 +109,10 @@ export const b2Routes = new Elysia({ name: 'b2' })
           .enum(['all', ...B2_PREFIX_GROUP])
           .optional()
           .describe('Filter by the img/<prefix>/ grouping; omit or "all" for everything'),
+        q: z
+          .string()
+          .optional()
+          .describe('Case-insensitive substring match against the object key'),
         page: z.coerce.number().int().min(1).default(1).optional(),
         limit: z.coerce.number().int().min(1).max(200).default(50).optional(),
         sort: z.enum(['lastModified', 'key', 'size']).default('lastModified').optional(),
@@ -123,7 +131,7 @@ export const b2Routes = new Elysia({ name: 'b2' })
         tags: ['Backblaze'],
         summary: 'List mirrored B2 objects',
         description:
-          'Paginated view of the b2_objects table (the local mirror of the bucket keyspace), filterable by the img/<prefix>/ grouping and sortable by lastModified/key/size. Each row flags whether it has been reverse-mirrored locally, links to the library image it was published from (if any), and carries ready-to-use CDN URLs. totalBytes/unmirroredCount/lastReconcileAt are always bucket-wide, ignoring the prefix filter, so the admin Public page can show cache health regardless of the active filter.',
+          'Paginated view of the b2_objects table (the local mirror of the bucket keyspace), filterable by the img/<prefix>/ grouping and a case-insensitive key substring (`q`), and sortable by lastModified/key/size. Each row flags whether it has been reverse-mirrored locally, links to the library image it was published from (if any), and carries ready-to-use CDN URLs. totalBytes/unmirroredCount/lastReconcileAt are always bucket-wide, ignoring the prefix/q filters, so the admin Public page can show cache health regardless of the active filter.',
         security: [{ BearerAuth: [] }],
       },
     },

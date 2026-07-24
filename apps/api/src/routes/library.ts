@@ -1,12 +1,25 @@
+import { unlink } from 'node:fs/promises'
 import { Elysia } from 'elysia'
 import { z } from 'zod'
-import { and, asc, count, desc, eq, gte, sql } from 'drizzle-orm'
+import { and, asc, count, desc, eq, gte, like, sql } from 'drizzle-orm'
 import { db } from '../db/index.js'
-import { images, type ImageRow } from '../db/schema.js'
+import { b2Objects, images, type ImageRow } from '../db/schema.js'
 import { env } from '../env.js'
 import { dirAtOrBelow } from '../lib/dir-scope.js'
 import { rootBaseDir, safeJoin } from '../lib/paths.js'
+import { renditionCacheKey, renditionCachePath, type RenditionSize } from '../renditions/cache.js'
 import { renderRendition } from '../renditions/render.js'
+
+const RENDITION_SIZES: readonly RenditionSize[] = ['thumb', 'med', 'full']
+
+/** Delete a file if present; a missing file is not an error (already gone). */
+async function unlinkIfExists(path: string): Promise<void> {
+  try {
+    await unlink(path)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+  }
+}
 
 // Library reads (design §8). `libraryRoutes` mounts INSIDE the bearer-guarded
 // /api group; `libraryFileRoutes` mounts OUTSIDE it (public) because browser
@@ -14,7 +27,9 @@ import { renderRendition } from '../renditions/render.js'
 // `?access_token=<API_SECRET>` and does its own check (mirrors argo's
 // audioFileRoutes precedent).
 
-const CONTENT_TYPE_BY_EXT: Record<string, string> = {
+// Exported so ingest.ts can validate uploaded MIME types against the exact
+// same ext→mime mapping this route uses to serve bytes back out.
+export const CONTENT_TYPE_BY_EXT: Record<string, string> = {
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
   png: 'image/png',
@@ -147,6 +162,9 @@ export const libraryRoutes = new Elysia({ name: 'library' })
       }
       // 0 means "no filter" (see folderShareImageFilter — NULL ratings).
       if (query.minRating) conditions.push(gte(images.rating, query.minRating))
+      // SQLite's LIKE is case-insensitive for ASCII by default (design §7), so
+      // a plain substring pattern already satisfies "case-insensitive".
+      if (query.stem) conditions.push(like(images.stem, `%${query.stem}%`))
       const where = conditions.length > 0 ? and(...conditions) : undefined
 
       const sortCol = sort === 'name' ? images.stem : images.captureAt
@@ -173,6 +191,10 @@ export const libraryRoutes = new Elysia({ name: 'library' })
         // `Boolean('false')` is true, which made `?recursive=false` recursive.
         recursive: z.stringbool().default(false).optional(),
         minRating: z.coerce.number().int().min(0).max(5).optional(),
+        stem: z
+          .string()
+          .optional()
+          .describe('Case-insensitive substring match against the filename stem'),
         page: z.coerce.number().int().min(1).default(1).optional(),
         limit: z.coerce.number().int().min(1).max(200).default(50).optional(),
         sort: z.enum(['captureAt', 'name']).default('captureAt').optional(),
@@ -183,7 +205,62 @@ export const libraryRoutes = new Elysia({ name: 'library' })
         tags: ['Library'],
         summary: 'List images in a folder',
         description:
-          'Paginated image list filtered by root/dir (optionally recursive), kind and minimum rating (0 = no filter), sorted by capture date or filename. `total` is the unfiltered-by-pagination count. Fetch bytes via GET /library/images/{id}/file.',
+          'Paginated image list filtered by root/dir (optionally recursive), kind, minimum rating (0 = no filter) and a case-insensitive filename-stem substring. `total` is the unfiltered-by-pagination count. Fetch bytes via GET /library/images/{id}/file.',
+        security: [{ BearerAuth: [] }],
+      },
+    },
+  )
+  .delete(
+    '/api/images/:id',
+    async ({ params, status }) => {
+      const [row] = await db.select().from(images).where(eq(images.id, params.id)).limit(1)
+      if (!row) return status(404, 'Image not found')
+      if (row.root !== 'share') {
+        return status(
+          403,
+          `Only root='share' images can be deleted (this image is root='${row.root}', a read-only source tree)`,
+        )
+      }
+
+      const absPath = safeJoin(rootBaseDir(row.root), row.relPath)
+      await unlinkIfExists(absPath)
+
+      for (const size of RENDITION_SIZES) {
+        const key = renditionCacheKey({
+          root: row.root,
+          relPath: row.relPath,
+          mtimeMs: row.mtimeMs,
+          fileSize: row.fileSize,
+          size,
+        })
+        await unlinkIfExists(renditionCachePath(key, size))
+      }
+
+      // b2_objects.published_image_id has no cascading FK (design §4) — a
+      // published copy stays on B2/the CDN forever, so null the back-link
+      // instead of touching the object.
+      await db
+        .update(b2Objects)
+        .set({ publishedImageId: null })
+        .where(eq(b2Objects.publishedImageId, row.id))
+
+      // share_images rows cascade automatically (schema onDelete: 'cascade').
+      await db.delete(images).where(eq(images.id, row.id))
+
+      return { deleted: true }
+    },
+    {
+      params: z.object({ id: z.coerce.number().int() }),
+      response: {
+        200: z.object({ deleted: z.boolean() }),
+        403: z.string(),
+        404: z.string(),
+      },
+      detail: {
+        tags: ['Library'],
+        summary: 'Delete a share-root image',
+        description:
+          "Deletes an image by id: only root='share' images may be deleted (fuji/raws are read-only source trees, rejected with 403). Removes the file under SHARE_ROOT, its cached renditions, and the images row. If the image was published to B2, the b2_objects row is kept but its published_image_id link is cleared — the CDN object itself is never deleted here. 404 on an unknown id.",
         security: [{ BearerAuth: [] }],
       },
     },

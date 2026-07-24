@@ -1,12 +1,15 @@
 import { afterAll, describe, expect, it, mock } from 'bun:test'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { rmSync } from 'node:fs'
+import { mkdir } from 'node:fs/promises'
 import { Database } from 'bun:sqlite'
+import { eq } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/bun-sqlite'
 import { migrate } from 'drizzle-orm/bun-sqlite/migrator'
 import { Elysia } from 'elysia'
 import * as schema from '../db/schema.js'
 import { env } from '../env.js'
+import { renditionCacheKey, renditionCachePath } from '../renditions/cache.js'
 
 // Isolated :memory: db — see the note in shares.test.ts (same `--isolate`
 // caveat for combined multi-file runs; this file is validated standalone).
@@ -165,5 +168,155 @@ describe('GET /api/library/images ?recursive', () => {
     const res = await list('root=raws&dir=Scope_1&recursive=true')
     expect(res.data.map((r) => r.id)).toEqual([mine])
     expect(res.total).toBe(1)
+  })
+})
+
+describe('GET /api/library/images ?stem', () => {
+  async function seedStem(stem: string): Promise<number> {
+    const now = new Date().toISOString()
+    const [row] = await testDb
+      .insert(schema.images)
+      .values({
+        root: 'raws',
+        relPath: `stem-test/${stem}.raf`,
+        dir: 'stem-test',
+        stem,
+        ext: 'raf',
+        kind: 'raw',
+        fileSize: 1,
+        mtimeMs: 1,
+        captureAt: null,
+        orientation: null,
+        rating: null,
+        width: null,
+        height: null,
+        rawPath: null,
+        indexedAt: now,
+      })
+      .returning({ id: schema.images.id })
+    if (!row) throw new Error('seed failed')
+    return row.id
+  }
+
+  async function list(qs: string) {
+    const res = await buildApp().handle(
+      new Request(`http://localhost/api/library/images?${qs}`, {
+        headers: { authorization: `Bearer ${env.API_SECRET}` },
+      }),
+    )
+    expect(res.status).toBe(200)
+    return (await res.json()) as { data: { id: number }[]; total: number }
+  }
+
+  it('matches a case-insensitive substring of the stem', async () => {
+    const match = await seedStem('DSCF-Sunset-1234')
+    await seedStem('DSCF-Rainy-5678')
+
+    const res = await list('root=raws&dir=stem-test&stem=sunset')
+    expect(res.data.map((r) => r.id)).toEqual([match])
+    expect(res.total).toBe(1)
+  })
+})
+
+describe('DELETE /api/images/:id', () => {
+  async function seedImage(root: 'fuji' | 'raws' | 'share', relPath: string): Promise<number> {
+    const now = new Date().toISOString()
+    const [row] = await testDb
+      .insert(schema.images)
+      .values({
+        root,
+        relPath,
+        dir: 'library-test-fixtures',
+        stem: 'delete-me',
+        ext: 'jpg',
+        kind: 'jpeg',
+        fileSize: 4,
+        mtimeMs: 1000,
+        captureAt: null,
+        orientation: null,
+        rating: null,
+        width: null,
+        height: null,
+        rawPath: null,
+        indexedAt: now,
+      })
+      .returning({ id: schema.images.id })
+    if (!row) throw new Error('seed failed')
+    return row.id
+  }
+
+  it('rejects fuji/raws images with 403 and does not touch the row', async () => {
+    const id = await seedImage('fuji', 'library-test-fixtures/fuji-image.jpg')
+
+    const res = await buildApp().handle(
+      new Request(`http://localhost/api/images/${id}`, {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${env.API_SECRET}` },
+      }),
+    )
+    expect(res.status).toBe(403)
+
+    const [row] = await testDb.select().from(schema.images).where(eq(schema.images.id, id))
+    expect(row).toBeDefined()
+  })
+
+  it('404s on an unknown id', async () => {
+    const res = await buildApp().handle(
+      new Request('http://localhost/api/images/999999999', {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${env.API_SECRET}` },
+      }),
+    )
+    expect(res.status).toBe(404)
+  })
+
+  it('deletes a share-root image: file, rendition cache entries, and row; nulls a b2_objects link instead of deleting it', async () => {
+    const relPath = 'library-test-fixtures/delete-me.jpg'
+    const absPath = join(env.SHARE_ROOT, relPath)
+    await Bun.write(absPath, new Uint8Array([1, 2, 3, 4]))
+
+    const id = await seedImage('share', relPath)
+
+    const cacheKey = renditionCacheKey({
+      root: 'share',
+      relPath,
+      mtimeMs: 1000,
+      fileSize: 4,
+      size: 'thumb',
+    })
+    const cachePath = renditionCachePath(cacheKey, 'thumb')
+    await mkdir(dirname(cachePath), { recursive: true })
+    await Bun.write(cachePath, new Uint8Array([9, 9]))
+
+    const publishedNow = new Date().toISOString()
+    await testDb.insert(schema.b2Objects).values({
+      key: 'img/misc/delete-me-published.jpg',
+      size: 4,
+      lastModified: publishedNow,
+      publishedImageId: id,
+      firstSeenAt: publishedNow,
+    })
+
+    const res = await buildApp().handle(
+      new Request(`http://localhost/api/images/${id}`, {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${env.API_SECRET}` },
+      }),
+    )
+    expect(res.status).toBe(200)
+    expect((await res.json()) as { deleted: boolean }).toEqual({ deleted: true })
+
+    expect(await Bun.file(absPath).exists()).toBe(false)
+    expect(await Bun.file(cachePath).exists()).toBe(false)
+
+    const [row] = await testDb.select().from(schema.images).where(eq(schema.images.id, id))
+    expect(row).toBeUndefined()
+
+    const [b2Row] = await testDb
+      .select()
+      .from(schema.b2Objects)
+      .where(eq(schema.b2Objects.key, 'img/misc/delete-me-published.jpg'))
+    expect(b2Row).toBeDefined()
+    expect(b2Row?.publishedImageId).toBeNull()
   })
 })

@@ -2,12 +2,21 @@ import { mkdirSync } from 'node:fs'
 import { basename, extname, join, posix } from 'node:path'
 import { Elysia } from 'elysia'
 import { z } from 'zod'
-import { indexSinglePath } from '../indexer/scan.js'
+import { EXT_KIND, indexSinglePath } from '../indexer/scan.js'
 import { env } from '../env.js'
+import { CONTENT_TYPE_BY_EXT } from './library.js'
 
 // Agent ingest (design §8). Multipart upload lands in the service-owned
 // SHARE_ROOT area (SHARE_ROOT/<yyyy>/<mm>/, collision-safe name), is indexed
 // immediately, and returns the canonical admin serving URL.
+
+// Same extension set the indexer recognizes (EXT_KIND, indexer/scan.ts) —
+// anything else would be written to SHARE_ROOT and then rejected by
+// indexSinglePath, orphaning the file on disk. Rejecting up front avoids that.
+const ALLOWED_EXTENSIONS = new Set(Object.keys(EXT_KIND))
+// Same ext→mime mapping library.ts uses to serve bytes back out.
+const ALLOWED_MIME_TYPES = new Set(Object.values(CONTENT_TYPE_BY_EXT))
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024 // 50 MB
 
 function sanitizeSubDir(dir: string): string {
   return dir
@@ -35,7 +44,33 @@ async function collisionSafeName(dirAbs: string, originalName: string): Promise<
 
 export const ingestRoutes = new Elysia({ name: 'ingest' }).post(
   '/api/images',
-  async ({ body, set }) => {
+  async ({ body, set, status }) => {
+    const ext = extname(body.file.name).slice(1).toLowerCase()
+    if (!ALLOWED_EXTENSIONS.has(ext)) {
+      return status(
+        400,
+        `Unsupported file extension "${ext || '(none)'}" — allowed: ${[...ALLOWED_EXTENSIONS].toSorted().join(', ')}`,
+      )
+    }
+    // Bun's multipart parser re-derives File#type from the filename extension
+    // rather than trusting the wire Content-Type of the part (verified against
+    // this exact runtime: a raw multipart body declaring "Content-Type:
+    // application/pdf" on a `sneaky.jpg` part still yields `type: "image/jpeg"`
+    // — the client's declared MIME never actually reaches the handler for a
+    // recognized extension). This check is therefore a defense-in-depth no-op
+    // today, guarding only against a future parser change; the extension check
+    // above is the real gate. `.raf` has no known mime and yields `''`, which
+    // skips this check entirely.
+    if (body.file.type && !ALLOWED_MIME_TYPES.has(body.file.type)) {
+      return status(400, `Unsupported MIME type "${body.file.type}" for extension ".${ext}"`)
+    }
+    if (body.file.size > MAX_UPLOAD_BYTES) {
+      return status(
+        400,
+        `File too large (${body.file.size} bytes) — max ${MAX_UPLOAD_BYTES} bytes (50 MB)`,
+      )
+    }
+
     const now = new Date()
     const yyyy = String(now.getFullYear())
     const mm = String(now.getMonth() + 1).padStart(2, '0')
@@ -71,12 +106,13 @@ export const ingestRoutes = new Elysia({ name: 'ingest' }).post(
         relPath: z.string(),
         adminFileUrl: z.string().describe('GET /api/library/images/{id}/file URL'),
       }),
+      400: z.string(),
     },
     detail: {
       tags: ['Ingest'],
       summary: 'Upload an image (agent ingest)',
       description:
-        'Multipart upload of a single image into the service-owned SHARE_ROOT area (SHARE_ROOT/<yyyy>/<mm>/ with a collision-safe name). Indexes the file immediately and returns its id, relPath, and the admin serving URL. This is the private ingest path — public publishing is POST /api/publish.',
+        'Multipart upload of a single image into the service-owned SHARE_ROOT area (SHARE_ROOT/<yyyy>/<mm>/ with a collision-safe name). Rejects (400) an extension/MIME type the indexer would not recognize (jpg/jpeg/png/webp/avif/heic/raf) or a file over 50 MB. Indexes the file immediately and returns its id, relPath, and the admin serving URL. This is the private ingest path — public publishing is POST /api/publish.',
       security: [{ BearerAuth: [] }],
     },
   },

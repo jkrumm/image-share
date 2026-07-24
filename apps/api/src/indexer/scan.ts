@@ -82,7 +82,9 @@ type Root = 'fuji' | 'raws' | 'share'
 
 // Extension → kind (design §5). Anything not listed here is skipped entirely
 // (never written to the DB) — includes `.xmp` sidecars and `.photo` files.
-const EXT_KIND: Record<string, ImageKind> = {
+// Exported so POST /api/images (ingest.ts) can validate uploads against the
+// exact same recognized-extension set instead of inventing a second list.
+export const EXT_KIND: Record<string, ImageKind> = {
   jpg: 'jpeg',
   jpeg: 'jpeg',
   png: 'image',

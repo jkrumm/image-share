@@ -101,6 +101,18 @@ describe('GET /api/b2', () => {
     expect(allExplicit.total).toBe(2)
   })
 
+  it('filters by a case-insensitive substring of the key via ?q=', async () => {
+    const app = new Elysia().use(b2Routes)
+
+    const res = (await (
+      await app.handle(new Request('http://localhost/api/b2?q=BLOG'))
+    ).json()) as B2ListResponse
+    expect(res.data.map((r) => r.key)).toEqual(['img/blog/b.jpg'])
+    expect(res.total).toBe(1)
+    // Aggregates stay bucket-wide regardless of the q filter.
+    expect(res.totalBytes).toBe(3)
+  })
+
   it('sorts by size ascending/descending', async () => {
     const app = new Elysia().use(b2Routes)
 

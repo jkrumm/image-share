@@ -75,6 +75,31 @@ describe('POST /api/images (ingest)', () => {
     expect(row?.kind).toBe('jpeg')
   })
 
+  it('rejects an unsupported file extension with 400', async () => {
+    const app = new Elysia().use(ingestRoutes)
+    const form = new FormData()
+    form.append('file', new File([new Uint8Array([1, 2, 3])], 'notes.txt', { type: 'text/plain' }))
+
+    const res = await app.handle(
+      new Request('http://localhost/api/images', { method: 'POST', body: form }),
+    )
+    expect(res.status).toBe(400)
+    expect(await res.text()).toContain('txt')
+  })
+
+  it('rejects a file over the 50 MB cap', async () => {
+    const app = new Elysia().use(ingestRoutes)
+    const form = new FormData()
+    const oversized = new Uint8Array(50 * 1024 * 1024 + 1)
+    form.append('file', new File([oversized], 'huge.jpg', { type: 'image/jpeg' }))
+
+    const res = await app.handle(
+      new Request('http://localhost/api/images', { method: 'POST', body: form }),
+    )
+    expect(res.status).toBe(400)
+    expect(await res.text()).toContain('too large')
+  })
+
   it('uses a collision-safe name on a repeated upload', async () => {
     const app = new Elysia().use(ingestRoutes)
     const form1 = new FormData()
