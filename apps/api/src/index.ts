@@ -52,12 +52,29 @@ export const app = new Elysia()
       },
     }),
   )
-  .onError(({ error }) => {
+  .onError(({ error, code, request }) => {
     const span = trace.getActiveSpan()
     if (span) {
       span.recordException(error as Error)
       span.setStatus({ code: SpanStatusCode.ERROR, message: String(error) })
     }
+    // Also log to stdout. Recording the exception on the span alone means an
+    // unhandled 500 produces a generic "an unexpected error has occurred" body
+    // and NOTHING in `docker logs` — the only way to see the cause is to have
+    // the trace backend up and queryable, which turns a one-minute diagnosis
+    // into a guessing game. NotFound is the one high-volume expected code
+    // (404 probing), so it stays quiet.
+    if (code === 'NOT_FOUND') return
+    console.error(
+      JSON.stringify({
+        level: 'error',
+        code,
+        method: request.method,
+        path: new URL(request.url).pathname,
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      }),
+    )
   })
   .use(
     cors({
