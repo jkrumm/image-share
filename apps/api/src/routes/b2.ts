@@ -10,6 +10,7 @@ import { env } from '../env.js'
 import { cdnOriginalUrl, cdnThumbUrl } from '../lib/cdn.js'
 import { deriveObjectFilename } from '../lib/naming.js'
 import { getS3 } from '../lib/s3.js'
+import { assertUploadableFile } from '../lib/upload-guard.js'
 
 // B2 object views + maintenance actions (design §8, extended in stage 4 for
 // the admin Public page: prefix/sort/pagination on the list, plus delete and
@@ -160,7 +161,13 @@ export const b2Routes = new Elysia({ name: 'b2' })
   )
   .post(
     '/api/b2/upload',
-    async ({ body }) => {
+    async ({ body, status }) => {
+      try {
+        assertUploadableFile(body.file)
+      } catch (err) {
+        return status(400, err instanceof Error ? err.message : 'Invalid file')
+      }
+
       const filename = deriveObjectFilename(body.prefix, sanitizeUploadFilename(body.file.name))
       const key = `${env.B2_PREFIX}${body.prefix}/${filename}`
 
@@ -173,12 +180,25 @@ export const b2Routes = new Elysia({ name: 'b2' })
       await s3.put(key, bytes)
 
       const now = new Date().toISOString()
-      await db.insert(b2Objects).values({
-        key,
-        size: bytes.byteLength,
-        lastModified: now,
-        firstSeenAt: now,
-      })
+      // onConflictDoUpdate: a stale mirror row can survive an out-of-band S3
+      // delete (s3.exists() above only checks the live bucket), so a re-upload
+      // to the same key must upsert rather than plain-insert — otherwise the
+      // UNIQUE violation on the key PK would 500 an upload that already
+      // succeeded against S3. Only refreshes what the new upload actually
+      // changed (size/lastModified/etag/mirrored); firstSeenAt and
+      // publishedImageId are left untouched.
+      await db
+        .insert(b2Objects)
+        .values({
+          key,
+          size: bytes.byteLength,
+          lastModified: now,
+          firstSeenAt: now,
+        })
+        .onConflictDoUpdate({
+          target: b2Objects.key,
+          set: { size: bytes.byteLength, lastModified: now, etag: null, mirroredAt: null },
+        })
 
       return { uploaded: true, key, cdnUrl: cdnOriginalUrl(key) }
     },
@@ -194,12 +214,13 @@ export const b2Routes = new Elysia({ name: 'b2' })
           cdnUrl: z.string(),
           reason: z.string().optional().describe('Present when uploaded is false'),
         }),
+        400: z.string(),
       },
       detail: {
         tags: ['Backblaze'],
         summary: 'Upload a file straight to the B2 img/ keyspace',
         description:
-          'Multipart upload directly to B2 under img/<prefix>/<filename> (prefix ∈ fuji|blog|gen|misc) — never touches the local disk roots. Readable prefixes (fuji/blog) use the sanitized upload filename; opaque prefixes (gen/misc) mint a random 16-char [a-z0-9] basename via lib/naming.ts instead (same rule as POST /api/publish). Skips (does not overwrite) a key that already exists, mirroring POST /api/publish. Upserts b2_objects on success and returns the CDN URL.',
+          'Multipart upload directly to B2 under img/<prefix>/<filename> (prefix ∈ fuji|blog|gen|misc) — never touches the local disk roots. Rejects (400) an extension/MIME type the indexer would not recognize or a file over 50 MB, same guard as POST /api/images. Readable prefixes (fuji/blog) use the sanitized upload filename; opaque prefixes (gen/misc) mint a random 16-char [a-z0-9] basename via lib/naming.ts instead (same rule as POST /api/publish). Skips (does not overwrite) a key that already exists on B2, mirroring POST /api/publish. Upserts b2_objects on success (refreshing size/lastModified/etag/mirrored, preserving firstSeenAt/publishedImageId if a stale row exists) and returns the CDN URL.',
         security: [{ BearerAuth: [] }],
       },
     },

@@ -316,4 +316,109 @@ describe('POST /api/b2/upload', () => {
     expect(body.reason).toBe('key already exists')
     expect(putCalls).toHaveLength(0)
   })
+
+  it('rejects an unsupported file extension with 400', async () => {
+    const putCalls: string[] = []
+    setS3({
+      list: async () => [],
+      exists: async () => false,
+      put: async (key) => {
+        putCalls.push(key)
+      },
+      get: async () => new Uint8Array(),
+      head: async () => null,
+      delete: async () => {},
+    })
+
+    const app = new Elysia().use(b2Routes)
+    const form = new FormData()
+    form.set('file', new File([new Uint8Array([1, 2, 3])], 'notes.txt', { type: 'text/plain' }))
+    form.set('prefix', 'misc')
+
+    const res = await app.handle(
+      new Request('http://localhost/api/b2/upload', { method: 'POST', body: form }),
+    )
+    expect(res.status).toBe(400)
+    expect(await res.text()).toContain('txt')
+    expect(putCalls).toHaveLength(0)
+  })
+
+  it('rejects a file over the 50 MB cap', async () => {
+    const putCalls: string[] = []
+    setS3({
+      list: async () => [],
+      exists: async () => false,
+      put: async (key) => {
+        putCalls.push(key)
+      },
+      get: async () => new Uint8Array(),
+      head: async () => null,
+      delete: async () => {},
+    })
+
+    const app = new Elysia().use(b2Routes)
+    const form = new FormData()
+    const oversized = new Uint8Array(50 * 1024 * 1024 + 1)
+    form.set('file', new File([oversized], 'huge.jpg', { type: 'image/jpeg' }))
+    form.set('prefix', 'misc')
+
+    const res = await app.handle(
+      new Request('http://localhost/api/b2/upload', { method: 'POST', body: form }),
+    )
+    expect(res.status).toBe(400)
+    expect(await res.text()).toContain('too large')
+    expect(putCalls).toHaveLength(0)
+  })
+
+  it('upserts over a stale mirror row (S3 object deleted out-of-band) instead of 500ing on the UNIQUE key', async () => {
+    const staleKey = 'img/fuji/stale.jpg'
+    const oldNow = new Date(Date.now() - 86_400_000).toISOString()
+    await testDb.insert(schema.b2Objects).values({
+      key: staleKey,
+      size: 1,
+      lastModified: oldNow,
+      mirroredAt: oldNow,
+      publishedImageId: null,
+      firstSeenAt: oldNow,
+    })
+
+    const written: Record<string, Uint8Array> = {}
+    setS3({
+      list: async () => [],
+      exists: async (key) => key in written, // the stale row's key was never actually re-uploaded to S3
+      put: async (key, data) => {
+        written[key] = data instanceof Uint8Array ? data : new Uint8Array(data as ArrayBuffer)
+      },
+      get: async (key) => {
+        const v = written[key]
+        if (!v) throw new Error('not found')
+        return v
+      },
+      head: async () => null,
+      delete: async () => {},
+    })
+
+    const app = new Elysia().use(b2Routes)
+    const form = new FormData()
+    form.set('file', new File([new Uint8Array([1, 2, 3, 4])], 'stale.jpg', { type: 'image/jpeg' }))
+    form.set('prefix', 'fuji')
+
+    const res = await app.handle(
+      new Request('http://localhost/api/b2/upload', { method: 'POST', body: form }),
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { uploaded: boolean; key: string }
+    expect(body.uploaded).toBe(true)
+    expect(body.key).toBe(staleKey)
+
+    const rows = await testDb
+      .select()
+      .from(schema.b2Objects)
+      .where(eq(schema.b2Objects.key, staleKey))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.size).toBe(4)
+    expect(rows[0]?.mirroredAt).toBeNull()
+    // firstSeenAt is preserved from the original (stale) row, not overwritten.
+    expect(rows[0]?.firstSeenAt).toBe(oldNow)
+  })
 })

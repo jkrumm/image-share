@@ -353,12 +353,13 @@ Errors: throw + bubble; guard throws `status(401)`; share routes catch-all → t
   see the credential note below), `SHARE_BASE_URL=https://share.jkrumm.com`,
   `CDN_BASE=https://img.jkrumm.com`, `OTEL_EXPORTER_OTLP_ENDPOINT=` (empty until ClickStack exists on homelab —
   homelab agent verifies; if no clickstack container there, leave unset), `TZ=Europe/Berlin`.
-- **B2 credential note (scoped-key migration)**: `B2_KEY_ID`/`B2_APP_KEY` move from the shared
+- **B2 credential note (scoped-key migration)**: `B2_KEY_ID`/`B2_APP_KEY` moved from the shared
   `op://common/b2-images-write` key to a dedicated, service-scoped key at
   `op://homelab/image-share/{B2_KEY_ID,B2_APP_KEY}` — capabilities `listFiles`/`readFiles`/`writeFiles`/`deleteFiles`,
   `namePrefix: img/`. This is what makes `DELETE /api/b2/:key` actually functional: the shared
-  `b2-images-write` key lacks `deleteFiles`, so today that route can only 500 when it reaches
-  `S3Port.delete`. `B2_ENDPOINT`/`B2_REGION`/`B2_BUCKET` are non-secret bucket config, unaffected,
+  `b2-images-write` key lacked `deleteFiles`, so that route used to only 500 when it reached
+  `S3Port.delete`. The scoped key deployed 2026-07-24 and the route is verified working in
+  production. `B2_ENDPOINT`/`B2_REGION`/`B2_BUCKET` are non-secret bucket config, unaffected,
   and stay on the shared `op://common/backblaze-s3` refs.
 - Caddyfile: single `share.jkrumm.com` site block — plain `reverse_proxy image-share:7720`
   handles for `/health`, `/api/*`, `/openapi*`, `/admin*`, `/s/*`, then a catch-all handle with
