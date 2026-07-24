@@ -6,7 +6,7 @@ import { env } from '../env.js'
 // `as: 'scoped'` propagates the lifecycle to sibling plugins mounted after this
 // guard inside the same parent instance — in index.ts the guard is mounted at
 // the head of the `/api` group so it covers every route in that group, while
-// the public surface (discovery, health, share pages, the access_token file
+// the public surface (discovery, health, share pages, the assetToken file
 // route, static SPA) is mounted OUTSIDE the group and stays unguarded.
 //
 // Auth runs in `onTransform` (before schema validation) so unauthenticated

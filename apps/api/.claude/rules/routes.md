@@ -42,10 +42,12 @@ reads return `{ data }` only (no `total`) when the full set is always returned
 - The bearer guard (`lib/auth-guard.ts`, `as: 'scoped'`) is mounted at the head
   of the `/api` group in `index.ts` — every route in that group is guarded.
 - Public routes are mounted OUTSIDE the group: discovery (`GET /api`), health,
-  the share surface (`/s/*`), the `access_token` byte route
+  the share surface (`/s/*`), the `assetToken` byte route
   (`/api/library/images/:id/file`), and the static SPA.
-- The `access_token` query bypass is for that ONE byte route only (browser
-  `<img>` tags). Do not add it elsewhere.
+- The `assetToken` query bypass is for that ONE byte route only (browser
+  `<img>` tags). It is a short-lived HMAC token minted by the bearer-guarded
+  `POST /api/library/asset-token` (`lib/asset-token.ts`) — never the raw
+  `API_SECRET`. Do not add the bypass elsewhere.
 
 ## Filesystem safety (hard rule, design §3)
 

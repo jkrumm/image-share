@@ -5,6 +5,7 @@ import { and, asc, count, desc, eq, gte, like, sql } from 'drizzle-orm'
 import { db } from '../db/index.js'
 import { b2Objects, images, type ImageRow } from '../db/schema.js'
 import { env } from '../env.js'
+import { mintAssetToken, verifyAssetToken } from '../lib/asset-token.js'
 import { dirAtOrBelow } from '../lib/dir-scope.js'
 import { rootBaseDir, safeJoin } from '../lib/paths.js'
 import { renditionCacheKey, renditionCachePath, type RenditionSize } from '../renditions/cache.js'
@@ -24,8 +25,10 @@ async function unlinkIfExists(path: string): Promise<void> {
 // Library reads (design §8). `libraryRoutes` mounts INSIDE the bearer-guarded
 // /api group; `libraryFileRoutes` mounts OUTSIDE it (public) because browser
 // `<img>` tags can't send an Authorization header — it accepts the bearer OR
-// `?access_token=<API_SECRET>` and does its own check (mirrors argo's
-// audioFileRoutes precedent).
+// a short-lived `?assetToken=…` minted by POST /api/library/asset-token (see
+// lib/asset-token.ts) and does its own check (mirrors argo's audioFileRoutes
+// precedent). The raw API_SECRET is never accepted as a query value — only
+// the asset token, which is scoped to this one route and expires in an hour.
 
 // Exported so ingest.ts can validate uploaded MIME types against the exact
 // same ext→mime mapping this route uses to serve bytes back out.
@@ -265,14 +268,29 @@ export const libraryRoutes = new Elysia({ name: 'library' })
       },
     },
   )
+  .post('/api/library/asset-token', () => mintAssetToken(), {
+    response: {
+      200: z.object({
+        token: z.string(),
+        expiresAt: z.string().describe('ISO 8601 token expiry'),
+      }),
+    },
+    detail: {
+      tags: ['Library'],
+      summary: 'Mint a short-lived asset token',
+      description:
+        'Issues an HMAC-signed token scoped to GET /library/images/{id}/file, valid for 1 hour. The admin SPA mints one per session and appends it as `?assetToken=…` so browser `<img>` tags can load thumbnails without carrying the bearer secret in a URL.',
+      security: [{ BearerAuth: [] }],
+    },
+  })
 
-// Public byte-serving route — bearer header OR ?access_token=<API_SECRET>.
+// Public byte-serving route — bearer header OR a short-lived ?assetToken=….
 export const libraryFileRoutes = new Elysia({ name: 'library-file' }).get(
   '/api/library/images/:id/file',
   async ({ params, query, request, status, set }) => {
     const header = request.headers.get('authorization')
     const bearer = header?.startsWith('Bearer ') ? header.slice(7) : null
-    const ok = bearer === env.API_SECRET || query.access_token === env.API_SECRET
+    const ok = bearer === env.API_SECRET || verifyAssetToken(query.assetToken)
     if (!ok) return status(401, 'Unauthorized')
 
     const [row] = await db.select().from(images).where(eq(images.id, params.id)).limit(1)
@@ -302,13 +320,18 @@ export const libraryFileRoutes = new Elysia({ name: 'library-file' }).get(
     params: z.object({ id: z.coerce.number().int() }),
     query: z.object({
       size: z.enum(['thumb', 'med', 'full', 'orig']).default('thumb'),
-      access_token: z.string().optional().describe('API_SECRET, for browser <img> tags only'),
+      assetToken: z
+        .string()
+        .optional()
+        .describe(
+          'Short-lived asset token from POST /api/library/asset-token, for browser <img> tags',
+        ),
     }),
     detail: {
       tags: ['Library'],
       summary: 'Serve image bytes (rendition or original)',
       description:
-        'Returns bytes for a library image by id: size=thumb|med|full renders a cached rendition; size=orig serves the original file. Accepts the bearer header OR `?access_token=<API_SECRET>` so browser `<img>` tags can load thumbnails. This is the ONLY route accepting access_token.',
+        'Returns bytes for a library image by id: size=thumb|med|full renders a cached rendition; size=orig serves the original file. Accepts the bearer header OR `?assetToken=…` (minted by POST /api/library/asset-token) so browser `<img>` tags can load thumbnails without carrying the bearer secret in a URL. This is the ONLY route accepting assetToken.',
       security: [{ BearerAuth: [] }],
     },
   },

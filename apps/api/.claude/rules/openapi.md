@@ -54,9 +54,9 @@ detail: {
 ```
 
 Public `/s/*` share routes carry `tags` + `summary` + `description` but NO
-`security` (access is governed by token/k, not the bearer). The `access_token`
+`security` (access is governed by token/k, not the bearer). The `assetToken`
 byte route documents `security: [{ BearerAuth: [] }]` even though it also
-accepts the query token.
+accepts the short-lived query token minted by `POST /api/library/asset-token`.
 
 ### Description quality bar
 

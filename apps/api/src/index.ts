@@ -125,7 +125,7 @@ export const app = new Elysia()
   // ── Public surface (before the scoped bearer guard) ──────────────────────
   .use(discoveryRoute) // GET /api discovery
   .use(healthRoute) // GET /health
-  .use(libraryFileRoutes) // access_token byte route (browser <img> tags)
+  .use(libraryFileRoutes) // assetToken byte route (browser <img> tags)
   .use(shareRoutes) // /s/* public share pages
   .use(staticPlugin) // SPA fallback (`/*` wildcard — lowest routing precedence)
   // ── Bearer-guarded admin surface ─────────────────────────────────────────

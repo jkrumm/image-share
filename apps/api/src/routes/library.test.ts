@@ -42,10 +42,18 @@ function buildApp() {
 }
 
 describe('bearer guard boundary', () => {
-  it('rejects /api/library/dirs without a bearer header, even with ?access_token', async () => {
+  it('rejects /api/library/dirs without a bearer header, even with an asset token', async () => {
     const app = buildApp()
+    const mintRes = await app.handle(
+      new Request('http://localhost/api/library/asset-token', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${env.API_SECRET}` },
+      }),
+    )
+    const { token } = (await mintRes.json()) as { token: string }
+
     const res = await app.handle(
-      new Request(`http://localhost/api/library/dirs?access_token=${env.API_SECRET}`),
+      new Request(`http://localhost/api/library/dirs?assetToken=${token}`),
     )
     expect(res.status).toBe(401)
   })
@@ -62,13 +70,48 @@ describe('bearer guard boundary', () => {
 })
 
 describe('GET /api/library/images/:id/file', () => {
-  it('rejects with neither bearer nor access_token', async () => {
+  it('rejects with neither bearer nor assetToken', async () => {
     const app = buildApp()
     const res = await app.handle(new Request('http://localhost/api/library/images/1/file'))
     expect(res.status).toBe(401)
   })
 
-  it('accepts ?access_token=<API_SECRET> (the only route allowed to)', async () => {
+  it('rejects ?assetToken=<API_SECRET> (the raw bearer must never work as a query value)', async () => {
+    const now = new Date().toISOString()
+    const relPath = 'library-test-fixtures/reject-raw-bearer.jpg'
+    await Bun.write(join(env.SHARE_ROOT, relPath), new Uint8Array([1, 2, 3, 4]))
+    const [row] = await testDb
+      .insert(schema.images)
+      .values({
+        root: 'share',
+        relPath,
+        dir: 'library-test-fixtures',
+        stem: 'reject-raw-bearer',
+        ext: 'jpg',
+        kind: 'jpeg',
+        fileSize: 4,
+        mtimeMs: Date.now(),
+        captureAt: null,
+        orientation: null,
+        rating: null,
+        width: null,
+        height: null,
+        rawPath: null,
+        indexedAt: now,
+      })
+      .returning({ id: schema.images.id })
+    if (!row) throw new Error('seed failed')
+
+    const app = buildApp()
+    const res = await app.handle(
+      new Request(
+        `http://localhost/api/library/images/${row.id}/file?size=orig&assetToken=${env.API_SECRET}`,
+      ),
+    )
+    expect(res.status).toBe(401)
+  })
+
+  it('accepts a minted ?assetToken=… (the only route allowed to)', async () => {
     const now = new Date().toISOString()
     const relPath = 'library-test-fixtures/orig.jpg'
     await Bun.write(join(env.SHARE_ROOT, relPath), new Uint8Array([1, 2, 3, 4]))
@@ -95,9 +138,18 @@ describe('GET /api/library/images/:id/file', () => {
     if (!row) throw new Error('seed failed')
 
     const app = buildApp()
+    const mintRes = await app.handle(
+      new Request('http://localhost/api/library/asset-token', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${env.API_SECRET}` },
+      }),
+    )
+    expect(mintRes.status).toBe(200)
+    const { token } = (await mintRes.json()) as { token: string }
+
     const res = await app.handle(
       new Request(
-        `http://localhost/api/library/images/${row.id}/file?size=orig&access_token=${env.API_SECRET}`,
+        `http://localhost/api/library/images/${row.id}/file?size=orig&assetToken=${token}`,
       ),
     )
     expect(res.status).toBe(200)

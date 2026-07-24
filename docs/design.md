@@ -237,7 +237,8 @@ for numeric params, `z.enum` never literal-unions, ISO date strings, `detail` wi
   "case-insensitive" since SQLite's `LIKE` is ASCII case-insensitive by default, same as the b2
   `prefix`/`q` filters below)
 - `GET /api/library/images/:id/file?size=thumb|med|full|orig` — bytes. Accepts bearer header OR
-  `?access_token=<API_SECRET>` (browser `<img>` tags; this route only).
+  `?assetToken=…` (browser `<img>` tags; this route only) — a short-lived (1h) HMAC-signed token,
+  never the raw `API_SECRET`. `POST /api/library/asset-token` (bearer-guarded) mints one.
 - `DELETE /api/images/:id` — deletes an image. Only `root='share'` images may be deleted (403 on
   `fuji`/`raws`, which are read-only source trees); 404 on an unknown id. Removes the file under
   `SHARE_ROOT`, its cached renditions (all three sizes, by recomputing the content-addressed cache
@@ -392,7 +393,7 @@ two peer nav items (labeled "Library (Private)" and "Public (CDN)") rather than 
 buried in Activity.
 
 - **Library** `/` — left dir tree (from /api/library/dirs), grid (SimpleGrid + AspectRatio + Image,
-  thumb via access_token URL), rating filter (Rating component), sort, pagination; lightbox = Modal
+  thumb via assetToken URL), rating filter (Rating component), sort, pagination; lightbox = Modal
   fullScreen with med rendition + prev/next/keyboard; selection mode → actions: "Publish to CDN…"
   (prefix picker modal → notifyPromise), "Create share" (selection share, capture-display order, via
   `CreateShareModal`); folder toolbar → "Share this folder" / "Share folder + subfolders" (the label
