@@ -305,9 +305,18 @@ for numeric params, `z.enum` never literal-unions, ISO date strings, `detail` wi
   library `stem` filter above). `thumbUrl` uses a 480px width (matches the renditions 'thumb' size,
   design §6). `lastReconcileAt` comes from an in-memory status object in `cron/b2-reconcile.ts`
   (mirrors the indexer's status pattern, design §5) — not persisted, resets on restart.
-- `POST /api/b2/upload` multipart `{ file, prefix: 'fuji'|'blog'|'gen'|'misc' }` → uploads straight to
-  B2 under `img/<prefix>/<sanitized filename>` (never touches a local disk root), skips (does not
-  overwrite) a pre-existing key, upserts b2_objects on success → `{ uploaded, key, cdnUrl, reason? }`.
+- `POST /api/b2/upload` multipart `{ file, prefix: 'fuji'|'blog'|'gen'|'misc', subdir? }` → uploads
+  straight to B2 under `img/<prefix>/<sanitized filename>`, or `img/<prefix>/<subdir>/<filename>` when
+  `subdir` is given (never touches a local disk root), skips (does not overwrite) a pre-existing key,
+  upserts b2_objects on success → `{ uploaded, key, cdnUrl, reason? }`. `subdir` (imgcli sync migration
+  — preserves nested export directory structure instead of flattening into one dir) is validated
+  strictly via `lib/naming.ts assertValidSubdir` since it becomes part of an object key: no
+  leading/trailing slash, no empty/`.`/`..` segment, segment chars restricted to `[A-Za-z0-9._-]`, max
+  8 segments, max 200 chars total — any violation is 400 before B2 is touched.
+- `GET /api/b2/:key` — same params contract as `DELETE /api/b2/:key` (URL-encoded full key, one path
+  segment, `B2_PREFIX` + traversal guard). Unlike `GET /api/b2` (reads the local mirror table), this
+  reads the bucket live via `S3Port.head` → 404 if absent, then joins in b2_objects mirror fields
+  (`mirrored`/`publishedImageId`/`firstSeenAt`, null/false when there's no mirror row) and `cdnUrl`.
 - `DELETE /api/b2/:key` — `key` is a single URL-encoded path segment (slashes included, e.g.
   `img%2Ffuji%2Fx.jpg`). Rejects (400) unless the decoded key starts with `B2_PREFIX` and contains no
   `..`/NUL traversal segment — the only guard between this route and the bucket, since `backups/`

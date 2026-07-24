@@ -8,7 +8,7 @@ import { db } from '../db/index.js'
 import { b2Objects } from '../db/schema.js'
 import { env } from '../env.js'
 import { cdnOriginalUrl, cdnThumbUrl } from '../lib/cdn.js'
-import { deriveObjectFilename } from '../lib/naming.js'
+import { assertValidSubdir, deriveObjectFilename } from '../lib/naming.js'
 import { getS3 } from '../lib/s3.js'
 import { assertUploadableFile } from '../lib/upload-guard.js'
 
@@ -168,8 +168,18 @@ export const b2Routes = new Elysia({ name: 'b2' })
         return status(400, err instanceof Error ? err.message : 'Invalid file')
       }
 
+      if (body.subdir) {
+        try {
+          assertValidSubdir(body.subdir)
+        } catch (err) {
+          return status(400, err instanceof Error ? err.message : 'Invalid subdir')
+        }
+      }
+
       const filename = deriveObjectFilename(body.prefix, sanitizeUploadFilename(body.file.name))
-      const key = `${env.B2_PREFIX}${body.prefix}/${filename}`
+      const key = body.subdir
+        ? `${env.B2_PREFIX}${body.prefix}/${body.subdir}/${filename}`
+        : `${env.B2_PREFIX}${body.prefix}/${filename}`
 
       const s3 = getS3()
       if (await s3.exists(key)) {
@@ -206,6 +216,12 @@ export const b2Routes = new Elysia({ name: 'b2' })
       body: z.object({
         file: z.file().describe('The image file to upload'),
         prefix: z.enum(B2_PREFIX_GROUP),
+        subdir: z
+          .string()
+          .optional()
+          .describe(
+            'Optional nested path under <prefix>/, e.g. "2026/07/trip" (preserves imgcli sync directory structure). Segments must match [A-Za-z0-9._-]+, no leading/trailing slash, no "." or ".." segment, max 8 segments, max 200 chars total — rejected with 400 otherwise.',
+          ),
       }),
       response: {
         200: z.object({
@@ -220,7 +236,72 @@ export const b2Routes = new Elysia({ name: 'b2' })
         tags: ['Backblaze'],
         summary: 'Upload a file straight to the B2 img/ keyspace',
         description:
-          'Multipart upload directly to B2 under img/<prefix>/<filename> (prefix ∈ fuji|blog|gen|misc) — never touches the local disk roots. Rejects (400) an extension/MIME type the indexer would not recognize or a file over 50 MB, same guard as POST /api/images. Readable prefixes (fuji/blog) use the sanitized upload filename; opaque prefixes (gen/misc) mint a random 16-char [a-z0-9] basename via lib/naming.ts instead (same rule as POST /api/publish). Skips (does not overwrite) a key that already exists on B2, mirroring POST /api/publish. Upserts b2_objects on success (refreshing size/lastModified/etag/mirrored, preserving firstSeenAt/publishedImageId if a stale row exists) and returns the CDN URL.',
+          'Multipart upload directly to B2 under img/<prefix>/<filename> (prefix ∈ fuji|blog|gen|misc), or img/<prefix>/<subdir>/<filename> when subdir is given — never touches the local disk roots. Rejects (400) an extension/MIME type the indexer would not recognize or a file over 50 MB, same guard as POST /api/images. subdir is validated strictly (it becomes part of an object key): no leading/trailing slash, no empty/"."/".." segment, segment chars restricted to [A-Za-z0-9._-], max 8 segments, max 200 chars total — any violation is a 400 before B2 is touched. Readable prefixes (fuji/blog) use the sanitized upload filename; opaque prefixes (gen/misc) mint a random 16-char [a-z0-9] basename via lib/naming.ts instead (same rule as POST /api/publish), nested under subdir when present. Skips (does not overwrite) a key that already exists on B2, mirroring POST /api/publish. Upserts b2_objects on success (refreshing size/lastModified/etag/mirrored, preserving firstSeenAt/publishedImageId if a stale row exists) and returns the CDN URL.',
+        security: [{ BearerAuth: [] }],
+      },
+    },
+  )
+  .get(
+    '/api/b2/:key',
+    async ({ params, status }) => {
+      let key: string
+      try {
+        key = decodeURIComponent(params.key)
+      } catch {
+        return status(400, 'Malformed key encoding')
+      }
+
+      try {
+        assertManagedKey(key)
+      } catch (err) {
+        return status(400, err instanceof Error ? err.message : 'Invalid key')
+      }
+
+      const object = await getS3().head(key)
+      if (!object) {
+        return status(404, 'Object not found')
+      }
+
+      // Mirror row is looked up separately from the live head() — a key can
+      // exist on B2 without ever having been mirrored locally (e.g. an
+      // out-of-band upload before the next reconcile tick), so the mirror
+      // fields are best-effort, not guaranteed.
+      const [mirrorRow] = await db.select().from(b2Objects).where(eq(b2Objects.key, key)).limit(1)
+
+      return {
+        key: object.key,
+        size: object.size,
+        lastModified: object.lastModified,
+        etag: object.etag ?? null,
+        cdnUrl: cdnOriginalUrl(key),
+        mirrored: mirrorRow?.mirroredAt != null,
+        publishedImageId: mirrorRow?.publishedImageId ?? null,
+        firstSeenAt: mirrorRow?.firstSeenAt ?? null,
+      }
+    },
+    {
+      params: z.object({
+        key: z.string().describe('URL-encoded full B2 key, e.g. img%2Ffuji%2Fx.jpg'),
+      }),
+      response: {
+        200: z.object({
+          key: z.string(),
+          size: z.number().int(),
+          lastModified: z.string(),
+          etag: z.string().nullable(),
+          cdnUrl: z.string().describe('Original-bytes img.jkrumm.com URL'),
+          mirrored: z.boolean().describe('Whether the key has been pulled into B2_MIRROR_DIR'),
+          publishedImageId: z.number().int().nullable(),
+          firstSeenAt: z.string().nullable().describe('Null when there is no b2_objects row'),
+        }),
+        400: z.string(),
+        404: z.string(),
+      },
+      detail: {
+        tags: ['Backblaze'],
+        summary: 'Get live B2 object info',
+        description:
+          'Head-requests a single key directly against the bucket (unlike GET /api/b2, which reads the local b2_objects mirror table) and joins in whatever mirror metadata exists for that key. The key must be URL-encoded (slashes included) as a single path segment and must start with the managed img/ prefix, same rule as DELETE /api/b2/:key — malformed encoding or an unmanaged/traversal key is a 400. 404 if the key does not exist on B2. mirrored/publishedImageId/firstSeenAt come from the b2_objects row when one exists (null/false otherwise) — a key can be on B2 without a mirror row if it was uploaded out-of-band before the next reconcile tick.',
         security: [{ BearerAuth: [] }],
       },
     },

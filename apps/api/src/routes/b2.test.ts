@@ -128,6 +128,136 @@ describe('GET /api/b2', () => {
   })
 })
 
+describe('GET /api/b2/:key', () => {
+  it('returns 404 for a key that does not exist on B2', async () => {
+    setS3({
+      list: async () => [],
+      exists: async () => false,
+      put: async () => {},
+      get: async () => new Uint8Array(),
+      head: async () => null,
+      delete: async () => {},
+    })
+
+    const app = new Elysia().use(b2Routes)
+    const res = await app.handle(
+      new Request(`http://localhost/api/b2/${encodeURIComponent('img/misc/nope.jpg')}`),
+    )
+    expect(res.status).toBe(404)
+  })
+
+  it('rejects a key outside the managed B2_PREFIX with 400', async () => {
+    setS3({
+      list: async () => [],
+      exists: async () => false,
+      put: async () => {},
+      get: async () => new Uint8Array(),
+      head: async () => {
+        throw new Error('head should not be called for a rejected key')
+      },
+      delete: async () => {},
+    })
+
+    const app = new Elysia().use(b2Routes)
+    const res = await app.handle(
+      new Request(`http://localhost/api/b2/${encodeURIComponent('backups/vps/postgres/dump.sql')}`),
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it('rejects malformed key encoding (Elysia nulls the param before the handler runs, so the route-level decodeURIComponent try/catch never fires — same pre-existing behavior as DELETE /api/b2/:key)', async () => {
+    const app = new Elysia().use(b2Routes)
+    const res = await app.handle(new Request('http://localhost/api/b2/%'))
+    expect(res.status).toBe(422)
+  })
+
+  it('returns live bucket info joined with mirror metadata when a mirror row exists', async () => {
+    const now = new Date().toISOString()
+    const [image] = await testDb
+      .insert(schema.images)
+      .values({
+        root: 'fuji',
+        relPath: 'mirrored.jpg',
+        dir: '',
+        stem: 'mirrored',
+        ext: 'jpg',
+        kind: 'jpeg',
+        fileSize: 1,
+        mtimeMs: 1,
+        indexedAt: now,
+      })
+      .returning()
+    await testDb.insert(schema.b2Objects).values({
+      key: 'img/fuji/mirrored.jpg',
+      size: 42,
+      lastModified: now,
+      mirroredAt: now,
+      publishedImageId: image?.id ?? null,
+      firstSeenAt: now,
+    })
+
+    setS3({
+      list: async () => [],
+      exists: async () => true,
+      put: async () => {},
+      get: async () => new Uint8Array(),
+      head: async (key) => ({ key, size: 99, lastModified: now, etag: 'live-etag' }),
+      delete: async () => {},
+    })
+
+    const app = new Elysia().use(b2Routes)
+    const res = await app.handle(
+      new Request(`http://localhost/api/b2/${encodeURIComponent('img/fuji/mirrored.jpg')}`),
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      key: string
+      size: number
+      etag: string | null
+      cdnUrl: string
+      mirrored: boolean
+      publishedImageId: number | null
+      firstSeenAt: string | null
+    }
+    // size/etag come from the LIVE head() call, not the mirror row.
+    expect(body.key).toBe('img/fuji/mirrored.jpg')
+    expect(body.size).toBe(99)
+    expect(body.etag).toBe('live-etag')
+    expect(body.cdnUrl).toBe(`${env.CDN_BASE}/fuji/mirrored.jpg`)
+    expect(body.mirrored).toBe(true)
+    expect(body.publishedImageId).toBe(image?.id ?? null)
+    expect(body.firstSeenAt).toBe(now)
+  })
+
+  it('returns null/false mirror fields when there is no mirror row', async () => {
+    const now = new Date().toISOString()
+    setS3({
+      list: async () => [],
+      exists: async () => true,
+      put: async () => {},
+      get: async () => new Uint8Array(),
+      head: async (key) => ({ key, size: 5, lastModified: now }),
+      delete: async () => {},
+    })
+
+    const app = new Elysia().use(b2Routes)
+    const res = await app.handle(
+      new Request(`http://localhost/api/b2/${encodeURIComponent('img/misc/unmirrored.jpg')}`),
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      etag: string | null
+      mirrored: boolean
+      publishedImageId: number | null
+      firstSeenAt: string | null
+    }
+    expect(body.etag).toBeNull()
+    expect(body.mirrored).toBe(false)
+    expect(body.publishedImageId).toBeNull()
+    expect(body.firstSeenAt).toBeNull()
+  })
+})
+
 describe('DELETE /api/b2/:key', () => {
   it('deletes a valid key via the S3 port and removes its row', async () => {
     const now = new Date().toISOString()
@@ -316,6 +446,139 @@ describe('POST /api/b2/upload', () => {
     expect(body.reason).toBe('key already exists')
     expect(putCalls).toHaveLength(0)
   })
+
+  it('nests the key under subdir for a readable prefix (filename preserved)', async () => {
+    const written: Record<string, Uint8Array> = {}
+    setS3({
+      list: async () => [],
+      exists: async (key) => key in written,
+      put: async (key, data) => {
+        written[key] = data instanceof Uint8Array ? data : new Uint8Array(data as ArrayBuffer)
+      },
+      get: async (key) => {
+        const v = written[key]
+        if (!v) throw new Error('not found')
+        return v
+      },
+      head: async () => null,
+      delete: async () => {},
+    })
+
+    const app = new Elysia().use(b2Routes)
+    const form = new FormData()
+    form.set('file', new File([new Uint8Array([1, 2, 3])], 'sunset.jpg'))
+    form.set('prefix', 'blog')
+    form.set('subdir', '2026/07/trip')
+
+    const res = await app.handle(
+      new Request('http://localhost/api/b2/upload', { method: 'POST', body: form }),
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { uploaded: boolean; key: string }
+    expect(body.key).toBe('img/blog/2026/07/trip/sunset.jpg')
+    expect(written['img/blog/2026/07/trip/sunset.jpg']).toBeDefined()
+  })
+
+  it('nests a random opaque basename under subdir', async () => {
+    const written: Record<string, Uint8Array> = {}
+    setS3({
+      list: async () => [],
+      exists: async (key) => key in written,
+      put: async (key, data) => {
+        written[key] = data instanceof Uint8Array ? data : new Uint8Array(data as ArrayBuffer)
+      },
+      get: async (key) => {
+        const v = written[key]
+        if (!v) throw new Error('not found')
+        return v
+      },
+      head: async () => null,
+      delete: async () => {},
+    })
+
+    const app = new Elysia().use(b2Routes)
+    const form = new FormData()
+    form.set('file', new File([new Uint8Array([1, 2, 3])], 'secret-plan.png'))
+    form.set('prefix', 'gen')
+    form.set('subdir', 'batch-1')
+
+    const res = await app.handle(
+      new Request('http://localhost/api/b2/upload', { method: 'POST', body: form }),
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { uploaded: boolean; key: string }
+    expect(body.key).toMatch(/^img\/gen\/batch-1\/[a-z0-9]{16}\.png$/)
+    expect(written[body.key]).toBeDefined()
+  })
+
+  it('leaves the key shape unchanged when subdir is omitted (regression guard)', async () => {
+    const written: Record<string, Uint8Array> = {}
+    setS3({
+      list: async () => [],
+      exists: async (key) => key in written,
+      put: async (key, data) => {
+        written[key] = data instanceof Uint8Array ? data : new Uint8Array(data as ArrayBuffer)
+      },
+      get: async (key) => {
+        const v = written[key]
+        if (!v) throw new Error('not found')
+        return v
+      },
+      head: async () => null,
+      delete: async () => {},
+    })
+
+    const app = new Elysia().use(b2Routes)
+    const form = new FormData()
+    form.set('file', new File([new Uint8Array([1, 2, 3])], 'plain.jpg'))
+    form.set('prefix', 'fuji')
+
+    const res = await app.handle(
+      new Request('http://localhost/api/b2/upload', { method: 'POST', body: form }),
+    )
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { uploaded: boolean; key: string }
+    expect(body.key).toBe('img/fuji/plain.jpg')
+  })
+
+  const invalidSubdirs: Array<[string, string]> = [
+    ['leading slash', '/a/b'],
+    ['trailing slash', 'a/b/'],
+    ['empty segment', 'a//b'],
+    ['dot segment', 'a/./b'],
+    ['dot-dot segment', 'a/../b'],
+    ['disallowed character', 'a/b c'],
+    ['too long', 'a'.repeat(201)],
+    ['too many segments', Array.from({ length: 9 }, () => 'x').join('/')],
+  ]
+
+  for (const [label, subdir] of invalidSubdirs) {
+    it(`rejects an invalid subdir (${label}) with 400 and never touches S3`, async () => {
+      let putCalled = false
+      setS3({
+        list: async () => [],
+        exists: async () => false,
+        put: async () => {
+          putCalled = true
+        },
+        get: async () => new Uint8Array(),
+        head: async () => null,
+        delete: async () => {},
+      })
+
+      const app = new Elysia().use(b2Routes)
+      const form = new FormData()
+      form.set('file', new File([new Uint8Array([1, 2, 3])], 'x.jpg'))
+      form.set('prefix', 'fuji')
+      form.set('subdir', subdir)
+
+      const res = await app.handle(
+        new Request('http://localhost/api/b2/upload', { method: 'POST', body: form }),
+      )
+      expect(res.status).toBe(400)
+      expect(putCalled).toBe(false)
+    })
+  }
 
   it('rejects an unsupported file extension with 400', async () => {
     const putCalls: string[] = []

@@ -30,3 +30,41 @@ export function deriveObjectFilename(prefix: string, originalFilename: string): 
   if (!isOpaquePrefix(prefix)) return originalFilename
   return `${randomBasename()}${extname(originalFilename)}`
 }
+
+// Optional `subdir` on POST /api/b2/upload (imgcli sync migration): `aws s3
+// sync` preserves nested directory structure, and routing that through the
+// flat `<prefix>/<filename>` key shape would silently collapse every export
+// into one directory and collide filenames. `subdir` nests under the prefix
+// instead. It becomes part of an object key, so it is treated as hostile
+// input and validated strictly rather than merely sanitized.
+const SUBDIR_MAX_LENGTH = 200
+const SUBDIR_MAX_SEGMENTS = 8
+const SUBDIR_SEGMENT_RE = /^[A-Za-z0-9._-]+$/
+
+/** Validates a `subdir` value bound for a B2 key. Throws a plain Error (routes
+ * surface it as a 400) — mirrors assertManagedKey in routes/b2.ts. Rejects a
+ * leading/trailing slash, empty segments, `.`/`..` segments, characters
+ * outside `[A-Za-z0-9._-]`, over 200 chars total, or more than 8 segments. */
+export function assertValidSubdir(subdir: string): void {
+  if (subdir.length > SUBDIR_MAX_LENGTH) {
+    throw new Error(`subdir must be at most ${SUBDIR_MAX_LENGTH} characters`)
+  }
+  if (subdir.startsWith('/') || subdir.endsWith('/')) {
+    throw new Error('subdir must not start or end with "/"')
+  }
+  const segments = subdir.split('/')
+  if (segments.length > SUBDIR_MAX_SEGMENTS) {
+    throw new Error(`subdir must have at most ${SUBDIR_MAX_SEGMENTS} segments`)
+  }
+  for (const segment of segments) {
+    if (segment === '') {
+      throw new Error('subdir must not contain empty segments')
+    }
+    if (segment === '.' || segment === '..') {
+      throw new Error('subdir segments must not be "." or ".."')
+    }
+    if (!SUBDIR_SEGMENT_RE.test(segment)) {
+      throw new Error(`subdir segment "${segment}" contains disallowed characters`)
+    }
+  }
+}
