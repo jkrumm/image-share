@@ -1,0 +1,49 @@
+# Build context is the REPO ROOT, not apps/api — see apps/api/Dockerfile's
+# header and homelab/docker-compose.yml (`context: <repo>`, `dockerfile:
+# apps/api/Dockerfile`). Every pattern below was checked against the full set of
+# COPY sources in that Dockerfile:
+#   package.json  bun.lock  apps/api/package.json  apps/admin/package.json
+#   apps/api  apps/admin
+# None of them is excluded here.
+
+# Dependencies. The builder runs its own `bun install --frozen-lockfile`; a host
+# tree is macOS-resolved (sharp ships per-platform binaries) and would otherwise
+# shadow it via `COPY apps/api ./apps/api`.
+node_modules
+**/node_modules
+
+# VCS, editor and OS noise. No build step reads git metadata.
+.git
+.idea
+.DS_Store
+**/.DS_Store
+
+# Local dev data roots: ingest tree, share root, SQLite, snapshots (scripts/dev.sh).
+# apps/api/src/env.ts only *defaults* to ./.dev/*; production sets every root
+# explicitly, and those defaults resolve against /app anyway, not apps/api.
+.dev
+**/.dev
+
+# Admin SPA output. The builder regenerates it inside the image.
+apps/admin/dist
+
+# Local env files and templates. No Dockerfile COPYs one.
+.env
+.env.*
+**/.env
+**/.env.*
+
+# Agent metadata
+.claude
+**/.claude
+
+# Logs, coverage, caches, local databases
+*.log
+**/*.log
+coverage
+**/coverage
+.turbo
+**/.turbo
+**/*.sqlite
+**/*.sqlite-wal
+**/*.sqlite-shm

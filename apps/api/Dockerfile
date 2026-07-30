@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 # image-share container (design §11). Build context is the REPO ROOT
 # (build: { context: ., dockerfile: apps/api/Dockerfile }). Debian base — NOT
 # alpine — because sharp's prebuilt binaries need glibc and exiftool-vendored
@@ -13,7 +15,8 @@ COPY package.json bun.lock ./
 COPY apps/api/package.json ./apps/api/
 COPY apps/admin/package.jso[n] ./apps/admin/
 
-RUN bun install --frozen-lockfile
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+  bun install --frozen-lockfile
 
 # Sources.
 COPY apps/api ./apps/api
