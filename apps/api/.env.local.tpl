@@ -26,17 +26,19 @@ CDN_BASE=https://img.jkrumm.com
 
 # ── Backblaze B2 (S3-compatible, via Bun.S3Client) ───────────────────────────
 # Prod refs (homelab): op://common/backblaze-s3 (endpoint/region/bucket) +
-# op://common/b2-images-write (key id / app key). Empty locally = publish and
-# reconcile paths stay dormant.
+# op://homelab/image-share (key id / app key — dedicated key with delete perms,
+# see docs/design.md:366-373; the shared op://common/b2-images-write key lacks
+# deleteFiles, so DELETE /api/b2/:key 500s against it). Empty locally = publish
+# and reconcile paths stay dormant.
 B2_ENDPOINT=op://common/backblaze-s3/ENDPOINT
 B2_REGION=op://common/backblaze-s3/REGION
 B2_BUCKET=op://common/backblaze-s3/BUCKET
-B2_KEY_ID=op://common/b2-images-write/B2_KEY_ID
-B2_APP_KEY=op://common/b2-images-write/B2_APP_KEY
+B2_KEY_ID=op://homelab/image-share/B2_KEY_ID
+B2_APP_KEY=op://homelab/image-share/B2_APP_KEY
 B2_PREFIX=img/
 
 # ── Uptime Kuma push heartbeat (reverse-backup) ──────────────────────────────
-# Prod: op://homelab/image-share/UPTIME_KUMA_PUSH_URL. Empty disables it.
+# Prod: op://homelab/image-share/KUMA_PUSH_URL. Empty disables it.
 UPTIME_KUMA_PUSH_URL=
 
 # ── OpenTelemetry ────────────────────────────────────────────────────────────
