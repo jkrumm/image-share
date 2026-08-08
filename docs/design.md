@@ -577,11 +577,45 @@ Routes (all under `/s`, public):
   yields.
 
   *Consequences.* Caveat 2 is gone — `Content-Length` is real again (a file response keeps it, so the
-  browser gets its progress bar and ETA back). `Range` now works: Bun answers a byte-range request
-  against a `Bun.file` response with its own 206 + `Content-Range`, so a 19 GB download that dies an
-  hour in **resumes** instead of restarting — worth more than everything else here. Re-downloading
-  costs one `sendfile`. The `estimateShareZipBytes` label (§7 share page) is unchanged and still
-  useful as an up-front size hint on the page itself.
+  browser gets its progress bar and ETA back). Re-downloading costs one `sendfile`. The
+  `estimateShareZipBytes` label (§7 share page) is unchanged and still useful as an up-front size
+  hint on the page itself.
+
+  *`Range` needed a second fix — Bun's own dispatch for it is unsafe at production scale.* An earlier
+  version of this section claimed "Bun answers a byte-range request against a `Bun.file` response
+  with its own 206 + `Content-Range` natively (verified on 1.3.14)". True in isolation, false as
+  deployment advice: `curl -r 100-200` against the live `segeln-25` archive (19 GB, spinning disk)
+  got a 502 after 8.8 s with a 16-byte body; the identical request against `http://localhost:7720`
+  *inside* the container — ruling out Cloudflare and Caddy both — never answered at all, and
+  `GET /health` failed its 5 s timeout within seconds and kept failing until Docker restarted the
+  container (~1m45s later, RestartCount 1→2, `ExitCode 0`, not OOM). Reproduced twice,
+  deterministically. A plain (non-range) request against the same archive immediately after the
+  restart was fine (200, ttfb 0.08 s), so this was specific to the `Range` path, not the spool or the
+  plain file response.
+
+  What's actually true on 1.3.14 (verified locally; the hang itself never reproduced there —
+  macOS/SSD, up to 3 GiB, every offset shape answered in single-digit ms — only the mechanism did):
+  Bun's automatic `Range` handling for a raw, un-sliced `Bun.file()` response body is unconditional
+  and **cannot be suppressed from JS** — an explicit `status: 200` on the returned `Response` is
+  silently overridden back to 206 whenever the incoming request carries a `Range` header, and
+  deleting that header from the request object first changes nothing either. A response whose body
+  is instead an *explicit* `Bun.file(path).slice(start, end)` is a different code path that Bun does
+  not renegotiate against the incoming header, and is still `sendfile`-backed (measured flat ~94 MiB
+  RSS slicing a 3 GiB file to a stalled reader — same bound as the un-sliced case). `Bun.file(path)
+  .stream()` looked like an easy way to dodge the automatic dispatch but is not a safe one: it is a
+  `ReadableStream` body and inherits the exact backpressure bug (oven-sh/bun#32469) this whole
+  archive-spooling design exists to route around — measured RSS to 10+ GiB against the same 3 GiB
+  file and a stalled reader.
+
+  So `Range` is now hand-parsed (`zip.ts parseRangeHeader`, RFC 7233 §2.1 single-range-spec grammar)
+  and every outcome — no header, a satisfiable range, an unsatisfiable one, or one RFC 7233 says to
+  ignore (malformed syntax, a multi-range list, a reversed first-byte-pos>last-byte-pos spec) — is
+  answered via an explicit `.slice()`, never the bare `file` object, so Bun's own dispatch is never
+  reached: normal (`N-M`) and suffix (`-N`) and open-ended (`N-`) ranges get 206 + `Content-Range`;
+  out-of-bounds gets 416 + `Content-Range: bytes */<size>`; an absurdly large end offset is clamped to
+  `size - 1` rather than rejected; everything else falls back to the ordinary whole-archive 200. A 19
+  GB download that dies an hour in still **resumes** instead of restarting — that part of the original
+  intent holds — it is just no longer Bun's default behavior doing the work.
 
   *The cost, and the one open deployment question.* Time-to-first-byte is now the spool time, paid
   once per (share, role, file-set). A friend's download-role archive (~2.75 GB of JPEGs, SSD) spools

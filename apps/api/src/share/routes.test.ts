@@ -482,6 +482,63 @@ describe('GET /s/:slug/zip (role-gated)', () => {
     expect(await res.text()).toBe(OPAQUE)
     expect(res.headers.get('referrer-policy')).toBe('no-referrer')
   })
+
+  // The `Range` header is threaded from the route into `buildShareZip` (zip.ts
+  // owns every shape — this just pins that the route wires it through and that
+  // role gating / the opaque 404 are unaffected by its presence).
+  describe('Range header wiring', () => {
+    const getRange = (path: string, range: string): Promise<Response> =>
+      app.handle(new Request(`http://localhost${path}`, { headers: { range } }))
+
+    it('view: still denied with the identical opaque 404, Range header or not', async () => {
+      const res = await getRange('/s/gallery/zip?token=view-tk', 'bytes=0-10')
+      expect(res.status).toBe(404)
+      expect(await res.text()).toBe(OPAQUE)
+    })
+
+    it('download: answers 206 with a correct Content-Range for a satisfiable range', async () => {
+      const whole = await (await get('/s/gallery/zip?token=dl-tk')).arrayBuffer()
+      const res = await getRange('/s/gallery/zip?token=dl-tk', 'bytes=0-9')
+      expect(res.status).toBe(206)
+      expect(res.headers.get('content-range')).toBe(`bytes 0-9/${whole.byteLength}`)
+      expect(res.headers.get('content-length')).toBe('10')
+      expect(new Uint8Array(await res.arrayBuffer())).toEqual(new Uint8Array(whole.slice(0, 10)))
+    })
+
+    it('download: an out-of-bounds range 416s with Content-Range: bytes */size', async () => {
+      const whole = await (await get('/s/gallery/zip?token=dl-tk')).arrayBuffer()
+      const res = await getRange(
+        '/s/gallery/zip?token=dl-tk',
+        `bytes=${whole.byteLength + 1000}-${whole.byteLength + 2000}`,
+      )
+      expect(res.status).toBe(416)
+      expect(res.headers.get('content-range')).toBe(`bytes */${whole.byteLength}`)
+    })
+
+    it('download: a malformed/multi-range/reversed Range header still serves the full 200 archive', async () => {
+      const whole = await (await get('/s/gallery/zip?token=dl-tk')).arrayBuffer()
+      for (const range of ['bytes=abc-def', 'bytes=0-99,200-299', 'bytes=500-100']) {
+        const res = await getRange('/s/gallery/zip?token=dl-tk', range)
+        expect(res.status).toBe(200)
+        expect((await res.arrayBuffer()).byteLength).toBe(whole.byteLength)
+      }
+    })
+
+    it('the server still answers a plain request after a batch of Range shapes', async () => {
+      for (const range of [
+        'bytes=0-9',
+        'bytes=-5',
+        'bytes=abc-def',
+        'bytes=0-99,200-299',
+        'bytes=500-100',
+        'bytes=999999999-999999999999',
+      ]) {
+        await getRange('/s/gallery/zip?token=dl-tk', range)
+      }
+      const res = await get('/s/gallery/zip?token=dl-tk')
+      expect(res.status).toBe(200)
+    })
+  })
 })
 
 describe('the removed unlock route', () => {

@@ -18,6 +18,7 @@ import {
   buildShareZip,
   estimateShareZipBytes,
   keepRequestAlive,
+  parseRangeHeader,
   zipSpoolKey,
   zipSpoolPath,
 } from './zip.js'
@@ -328,18 +329,192 @@ describe('buildShareZip spooling', () => {
     expect(asLatin1(buf)).toContain('DSCF0002.JPG')
   })
 
-  it('answers a byte-range request from the spool so a big download can resume', async () => {
+  // Real `Bun.serve` round trips (not `buildShareZip` called directly), so
+  // these exercise the actual wire path: `fetch` handler reads the incoming
+  // `Range` header and hands it to `buildShareZip`, exactly like
+  // share/routes.ts. This is deliberate — a bare, un-sliced `Bun.file(path)`
+  // response would ALSO answer these correctly via Bun's own automatic
+  // dispatch (that was the pre-fix behavior), so a test built on
+  // `buildShareZip` output alone cannot tell "our own parsing" from "Bun's
+  // unsuppressible auto-dispatch" apart. Going over a real socket is what
+  // pins that the fix, not the old behavior, is what is answering.
+  describe('Range request handling (every shape a client can send)', () => {
     const uniq = shareOf({ slug: 'resumable' })
+
+    async function withServer(fn: (url: string) => Promise<void>): Promise<void> {
+      const server = Bun.serve({
+        port: 0,
+        fetch: async (req) =>
+          await buildShareZip({
+            share: uniq,
+            images,
+            role: 'download',
+            rangeHeader: req.headers.get('range'),
+          }),
+      })
+      try {
+        await fn(server.url.toString())
+      } finally {
+        server.stop(true)
+      }
+    }
+
+    it('normal range: 206 + correct Content-Range + correct bytes', async () => {
+      await withServer(async (url) => {
+        const whole = new Uint8Array(await (await fetch(url)).arrayBuffer())
+        const res = await fetch(url, { headers: { range: 'bytes=8-23' } })
+        expect(res.status).toBe(206)
+        expect(res.headers.get('content-range')).toBe(`bytes 8-23/${whole.length}`)
+        expect(res.headers.get('content-length')).toBe('16')
+        expect(new Uint8Array(await res.arrayBuffer())).toEqual(whole.slice(8, 24))
+      })
+    })
+
+    it('suffix range (`-N`): last N bytes', async () => {
+      await withServer(async (url) => {
+        const whole = new Uint8Array(await (await fetch(url)).arrayBuffer())
+        const res = await fetch(url, { headers: { range: 'bytes=-16' } })
+        expect(res.status).toBe(206)
+        const start = whole.length - 16
+        expect(res.headers.get('content-range')).toBe(
+          `bytes ${start}-${whole.length - 1}/${whole.length}`,
+        )
+        expect(new Uint8Array(await res.arrayBuffer())).toEqual(whole.slice(start))
+      })
+    })
+
+    it('open-ended range (`N-`): from N to the end', async () => {
+      await withServer(async (url) => {
+        const whole = new Uint8Array(await (await fetch(url)).arrayBuffer())
+        const start = whole.length - 32
+        const res = await fetch(url, { headers: { range: `bytes=${start}-` } })
+        expect(res.status).toBe(206)
+        expect(res.headers.get('content-range')).toBe(
+          `bytes ${start}-${whole.length - 1}/${whole.length}`,
+        )
+        expect(new Uint8Array(await res.arrayBuffer())).toEqual(whole.slice(start))
+      })
+    })
+
+    it('reversed range (first > last): syntactically invalid, ignored — full 200 body', async () => {
+      await withServer(async (url) => {
+        const whole = new Uint8Array(await (await fetch(url)).arrayBuffer())
+        const res = await fetch(url, { headers: { range: 'bytes=500-100' } })
+        expect(res.status).toBe(200)
+        expect(new Uint8Array(await res.arrayBuffer())).toEqual(whole)
+      })
+    })
+
+    it('out-of-bounds range: 416 with Content-Range: bytes */size, no body', async () => {
+      await withServer(async (url) => {
+        const whole = new Uint8Array(await (await fetch(url)).arrayBuffer())
+        const total = whole.length
+        const res = await fetch(url, {
+          headers: { range: `bytes=${total + 1000}-${total + 2000}` },
+        })
+        expect(res.status).toBe(416)
+        expect(res.headers.get('content-range')).toBe(`bytes */${total}`)
+        expect((await res.arrayBuffer()).byteLength).toBe(0)
+      })
+    })
+
+    it('absurdly large end offset: clamped to size - 1, not rejected or hung', async () => {
+      await withServer(async (url) => {
+        const whole = new Uint8Array(await (await fetch(url)).arrayBuffer())
+        const res = await fetch(url, { headers: { range: 'bytes=0-99999999999999' } })
+        expect(res.status).toBe(206)
+        expect(res.headers.get('content-range')).toBe(`bytes 0-${whole.length - 1}/${whole.length}`)
+        expect(new Uint8Array(await res.arrayBuffer())).toEqual(whole)
+      })
+    })
+
+    it('multi-range list: unsupported, ignored — full 200 body', async () => {
+      await withServer(async (url) => {
+        const whole = new Uint8Array(await (await fetch(url)).arrayBuffer())
+        const res = await fetch(url, { headers: { range: 'bytes=0-99,200-299' } })
+        expect(res.status).toBe(200)
+        expect(new Uint8Array(await res.arrayBuffer())).toEqual(whole)
+      })
+    })
+
+    it('malformed range (non-numeric): ignored — full 200 body', async () => {
+      await withServer(async (url) => {
+        const whole = new Uint8Array(await (await fetch(url)).arrayBuffer())
+        const res = await fetch(url, { headers: { range: 'bytes=abc-def' } })
+        expect(res.status).toBe(200)
+        expect(new Uint8Array(await res.arrayBuffer())).toEqual(whole)
+      })
+    })
+
+    it('malformed range (wrong unit): ignored — full 200 body', async () => {
+      await withServer(async (url) => {
+        const whole = new Uint8Array(await (await fetch(url)).arrayBuffer())
+        const res = await fetch(url, { headers: { range: 'notbytes=0-10' } })
+        expect(res.status).toBe(200)
+        expect(new Uint8Array(await res.arrayBuffer())).toEqual(whole)
+      })
+    })
+
+    it('the server still answers after every shape above — the loop is not wedged', async () => {
+      await withServer(async (url) => {
+        const ranges = [
+          'bytes=8-23',
+          'bytes=-16',
+          'bytes=500-100',
+          'bytes=999999999-999999999999',
+          'bytes=0-99999999999999',
+          'bytes=0-99,200-299',
+          'bytes=abc-def',
+        ]
+        for (const range of ranges) {
+          await fetch(url, { headers: { range } })
+        }
+        const res = await fetch(url)
+        expect(res.status).toBe(200)
+        expect((await res.arrayBuffer()).byteLength).toBeGreaterThan(0)
+      })
+    })
+  })
+
+  it('holds flat memory serving a Range response to a consumer that stalls before reading anything', async () => {
+    // The production wedge left no memory signature (ExitCode 0, not OOM), but
+    // this pins the OTHER hazard a naive Range fix could reintroduce: falling
+    // back to a `ReadableStream`/`.stream()` body to dodge Bun's automatic
+    // dispatch, which inherits oven-sh/bun#32469 and balloons unbounded (see
+    // zip.ts's header comment). A `.slice()`-backed 206 must stay
+    // `sendfile`-flat exactly like the plain download path already is.
+    const uniq = shareOf({ slug: 'range-slow-consumer' })
     const server = Bun.serve({
       port: 0,
-      fetch: async () => await buildShareZip({ share: uniq, images, role: 'download' }),
+      fetch: async (req) =>
+        await buildShareZip({
+          share: uniq,
+          images,
+          role: 'download',
+          rangeHeader: req.headers.get('range'),
+        }),
     })
     try {
-      const whole = new Uint8Array(await (await fetch(server.url)).arrayBuffer())
-      const res = await fetch(server.url, { headers: { range: `bytes=8-23` } })
+      const res = await fetch(server.url, { headers: { range: 'bytes=0-' } })
       expect(res.status).toBe(206)
-      expect(res.headers.get('content-range')).toBe(`bytes 8-23/${whole.length}`)
-      expect(new Uint8Array(await res.arrayBuffer())).toEqual(whole.slice(8, 24))
+      const reader = res.body!.getReader()
+      const baselineRss = process.memoryUsage().rss
+      // Never drain the stream before checking — the response is already fully
+      // available server-side (a completed spool), so any accumulation here is
+      // the server buffering it into memory rather than letting the socket
+      // pace it, exactly the failure mode `.stream()`/`ReadableStream` bodies
+      // have on this Bun version.
+      await Bun.sleep(300)
+      const afterRss = process.memoryUsage().rss
+      expect(afterRss - baselineRss).toBeLessThan(50 * 1024 * 1024)
+      // Drain and confirm the server is still responsive afterwards.
+      for (;;) {
+        const { done } = await reader.read()
+        if (done) break
+      }
+      const followUp = await fetch(server.url)
+      expect(followUp.status).toBe(200)
+      await followUp.arrayBuffer()
     } finally {
       server.stop(true)
     }
@@ -549,6 +724,68 @@ describe('keepRequestAlive', () => {
       server.stop(true)
     }
   }, 30_000)
+})
+
+describe('parseRangeHeader', () => {
+  const SIZE = 1000
+
+  it('no header at all → full', () => {
+    expect(parseRangeHeader(null, SIZE)).toEqual({ kind: 'full' })
+    expect(parseRangeHeader(undefined, SIZE)).toEqual({ kind: 'full' })
+  })
+
+  it('a normal range', () => {
+    expect(parseRangeHeader('bytes=100-200', SIZE)).toEqual({ kind: 'range', start: 100, end: 200 })
+  })
+
+  it('a suffix range (last N bytes)', () => {
+    expect(parseRangeHeader('bytes=-500', SIZE)).toEqual({ kind: 'range', start: 500, end: 999 })
+  })
+
+  it('a suffix range longer than the whole file clamps to byte 0', () => {
+    expect(parseRangeHeader('bytes=-5000', SIZE)).toEqual({ kind: 'range', start: 0, end: 999 })
+  })
+
+  it('an open-ended range (N-) runs to the end', () => {
+    expect(parseRangeHeader('bytes=500-', SIZE)).toEqual({ kind: 'range', start: 500, end: 999 })
+  })
+
+  it('a reversed range (first > last) is syntactically invalid → full, not 416', () => {
+    expect(parseRangeHeader('bytes=500-100', SIZE)).toEqual({ kind: 'full' })
+  })
+
+  it('an out-of-bounds start → unsatisfiable', () => {
+    expect(parseRangeHeader('bytes=1000-2000', SIZE)).toEqual({ kind: 'unsatisfiable' })
+    expect(parseRangeHeader('bytes=5000-6000', SIZE)).toEqual({ kind: 'unsatisfiable' })
+  })
+
+  it('an absurdly large end is clamped to size - 1, never overflows or throws', () => {
+    expect(parseRangeHeader('bytes=0-99999999999999', SIZE)).toEqual({
+      kind: 'range',
+      start: 0,
+      end: 999,
+    })
+  })
+
+  it('a multi-range list is unsupported → full', () => {
+    expect(parseRangeHeader('bytes=0-99,200-299', SIZE)).toEqual({ kind: 'full' })
+  })
+
+  it('malformed (non-numeric) → full', () => {
+    expect(parseRangeHeader('bytes=abc-def', SIZE)).toEqual({ kind: 'full' })
+  })
+
+  it('wrong unit → full', () => {
+    expect(parseRangeHeader('notbytes=0-10', SIZE)).toEqual({ kind: 'full' })
+  })
+
+  it('empty/bare "bytes=-" → full', () => {
+    expect(parseRangeHeader('bytes=-', SIZE)).toEqual({ kind: 'full' })
+  })
+
+  it('a zero-byte file is always unsatisfiable', () => {
+    expect(parseRangeHeader('bytes=0-10', 0)).toEqual({ kind: 'unsatisfiable' })
+  })
 })
 
 describe('estimateShareZipBytes', () => {

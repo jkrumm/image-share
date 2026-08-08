@@ -59,10 +59,6 @@ import { attachment } from './attachment.js'
 //     fall back to `Transfer-Encoding: chunked` (measured at the origin inside
 //     the container), which is why the browser showed no progress bar and no
 //     ETA on a multi-GB download. A file response keeps it.
-//   + `Range` works: Bun answers a byte-range request against a `Bun.file`
-//     response with a 206 + `Content-Range` natively (verified on 1.3.14), so a
-//     19 GB download that dies an hour in can now be RESUMED instead of
-//     restarted. That matters more than everything else here.
 //   + Re-downloading a share costs one `sendfile`, not a second archive build.
 //   - Time-to-first-byte is now the spool time (measured ~430 MB/s locally),
 //     paid once per (share, role, file-set). See design §7 for the deployment
@@ -74,6 +70,58 @@ import { attachment } from './attachment.js'
 // The spool is a content-addressed, LRU-evicted cache under DATA_DIR, exactly
 // like the rendition cache (renditions/cache.ts) — same key shape, same mtime
 // clock, same eviction story. It is rebuildable: deleting it costs a rebuild.
+//
+// ── `Range` DOES NOT WORK OUT OF THE BOX — IT WEDGED THE EVENT LOOP IN PRODUCTION ──
+//
+// An earlier version of this file claimed "Bun answers a byte-range request
+// against a `Bun.file` response with a 206 + `Content-Range` natively". That is
+// true in isolation and false as deployment advice: `curl -r 100-200` against
+// the live `segeln-25` archive (19 GB, spinning disk) got a 502 after 8.8 s
+// with a 16-byte body; the SAME request against `http://localhost:7720` from
+// *inside* the container (Cloudflare and Caddy both ruled out) never answered
+// at all, and `GET /health` started failing its 5 s timeout within seconds and
+// kept failing until Docker restarted the container (~1m45s later,
+// RestartCount 1→2, ExitCode 0, not OOM). Reproduced twice, deterministically.
+// A plain (non-range) request against the same archive immediately after the
+// restart was fine — 200, ttfb 0.08 s — so this is specific to the `Range`
+// path, not the spool or the plain file response above.
+//
+// What is actually true on 1.3.14, verified locally (macOS/SSD, up to 3 GiB,
+// every offset shape — near-start/near-end/middle/suffix/open-ended all
+// answered in single-digit ms, so the local environment never reproduced the
+// hang itself; only the *mechanism* below was pinned down):
+//
+//   - Bun's automatic `Range` handling is UNCONDITIONAL for a raw, un-sliced
+//     `Bun.file()` response body, and CANNOT be suppressed from JS. Explicitly
+//     setting `status: 200` on the `Response` we return is silently overridden
+//     back to 206 whenever the incoming request carries a `Range` header;
+//     deleting `request.headers.get('range')` before returning does nothing
+//     either — the decision is made from the raw incoming request, not from
+//     anything we hand back. There is no supported way to opt a `Bun.file`
+//     response out of it.
+//   - A response whose body is an EXPLICIT `Bun.file(path).slice(start, end)`
+//     is a different code path: Bun does not renegotiate it against the
+//     incoming `Range` header (measured: slicing to an arbitrary 50-byte
+//     window and asserting our own 206 + our own `Content-Range` is honored
+//     byte-for-byte even when the request's `Range` header asks for a
+//     completely different, non-overlapping window). It is still
+//     `sendfile(2)`-backed and memory-flat under a stalled reader (measured:
+//     a `.slice(0, size)` view of a 3 GiB file held RSS at ~94 MiB against a
+//     socket that read nothing, same bound as the un-sliced case).
+//   - `Bun.file(path).stream()` is NOT a safe way to sidestep the automatic
+//     dispatch: it is a `ReadableStream` body and inherits the exact
+//     backpressure bug this file exists to route around (oven-sh/bun#32469;
+//     see the measurements above) — a stalled reader against a `.stream()` of
+//     the same 3 GiB file drove RSS to 10+ GiB. Never reach for it here.
+//
+// So the fix (`parseRangeHeader` + the branches in `buildShareZip` below)
+// takes `Range` parsing entirely into our own hands and answers EVERY shape —
+// present, absent, satisfiable, unsatisfiable, or one we deliberately ignore
+// per RFC 7233 (malformed, multi-range, a reversed first-byte-pos>last-byte-pos
+// spec) — via an explicit `.slice()`. A bare, un-sliced `Bun.file(path)` must
+// never again be handed to `new Response()` on this route while a `Range`
+// header could be present, because that is precisely the code path production
+// could not survive.
 
 /** Max concurrent `stat()` calls when sizing a share's files. */
 const STAT_CONCURRENCY = 32
@@ -529,9 +577,71 @@ async function ensureSpool(input: {
 }
 
 /**
+ * Outcome of matching a `Range` header against a known total size (RFC 7233
+ * §2.1, single-range-spec grammar only — see the header comment above for why
+ * this is hand-rolled instead of leaning on Bun's own automatic dispatch).
+ *
+ * `full` covers both "no header at all" and "a header RFC 7233 requires the
+ * server to ignore" — malformed syntax, a multi-range list (a comma;
+ * multipart/byteranges is not implemented), or a syntactically reversed
+ * first-byte-pos > last-byte-pos spec. Either way the caller serves the
+ * ordinary whole-archive response.
+ */
+type ParsedRange =
+  | { kind: 'full' }
+  | { kind: 'unsatisfiable' }
+  | { kind: 'range'; start: number; end: number }
+
+const RANGE_HEADER_RE = /^bytes=(\d*)-(\d*)$/
+
+/**
+ * Parse a single-range `Range: bytes=...` header against `size`. Pure and
+ * exported so every shape a client can send has one deterministic,
+ * unit-tested answer: normal (`N-M`), suffix (`-N`, last N bytes), open-ended
+ * (`N-`), reversed (`full` — invalid, ignored per RFC 7233), out-of-bounds
+ * (`unsatisfiable`), an absurdly large end (clamped to `size - 1`), a
+ * multi-range list (`full` — unsupported, ignored), and garbage (`full`).
+ */
+export function parseRangeHeader(header: string | null | undefined, size: number): ParsedRange {
+  if (!header) return { kind: 'full' }
+  const match = RANGE_HEADER_RE.exec(header.trim())
+  if (!match) return { kind: 'full' } // garbage, or a multi-range list (has a comma)
+  const [, startStr, endStr] = match
+  if (startStr === '' && endStr === '') return { kind: 'full' } // "bytes=-"
+  if (size <= 0) return { kind: 'unsatisfiable' }
+
+  let start: number
+  let end: number
+  if (startStr === '') {
+    // Suffix range: the last `endStr` bytes.
+    const suffixLength = Number(endStr)
+    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) return { kind: 'full' }
+    start = Math.max(0, size - suffixLength)
+    end = size - 1
+  } else {
+    start = Number(startStr)
+    end = endStr === '' ? size - 1 : Number(endStr)
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)) return { kind: 'full' }
+    if (end < start) return { kind: 'full' } // reversed spec: syntactically invalid, ignore it
+    end = Math.min(end, size - 1)
+  }
+
+  if (start >= size) return { kind: 'unsatisfiable' }
+  return { kind: 'range', start, end }
+}
+
+/**
  * Build the ZIP `Response` for a share (filename `<slug>.zip`).
  * `role` must be 'download' or 'full' — the caller (share/routes.ts) 404s a
  * 'view' role before ever calling in here.
+ *
+ * `rangeHeader` is the incoming request's raw `Range` header (or `null`).
+ * Every outcome — no header, a satisfiable range, an unsatisfiable one, or one
+ * this route deliberately ignores — is answered via an explicit
+ * `Bun.file(path).slice(...)`, never the bare `file` object, because Bun 1.3.14
+ * re-applies its own unsuppressible (and, at production scale, wedging — see
+ * the header comment) `Range` dispatch to ANY raw `Bun.file` response body
+ * whenever the incoming request carries a `Range` header at all.
  *
  * Rejects with `ZipSpoolAbortedError` if the visitor disconnects while their
  * archive is still spooling — the build itself carries on, so their retry is a
@@ -542,6 +652,7 @@ export async function buildShareZip(input: {
   images: ImageRow[]
   role: ShareTokenRole
   signal?: AbortSignal
+  rangeHeader?: string | null
 }): Promise<Response> {
   const { share } = input
   const candidates = zipPathsFor(input)
@@ -599,17 +710,42 @@ export async function buildShareZip(input: {
   }
 
   const file = Bun.file(path)
-  return new Response(file, {
-    headers: {
-      'content-type': 'application/zip',
-      // The archive is on disk, so this is the real byte count rather than a
-      // prediction Bun then discards. Bun still answers a `Range` request
-      // against this response with its own 206 + `Content-Range`.
-      'content-length': String(file.size),
-      // The slug is user-controlled; the shared RFC 5987 builder is the only
-      // sanctioned way to put it in a header (see share/attachment.ts).
-      'content-disposition': attachment(`${share.slug}.zip`),
-    },
+  const headers: Record<string, string> = {
+    'content-type': 'application/zip',
+    // The slug is user-controlled; the shared RFC 5987 builder is the only
+    // sanctioned way to put it in a header (see share/attachment.ts).
+    'content-disposition': attachment(`${share.slug}.zip`),
+    'accept-ranges': 'bytes',
+  }
+
+  const parsed = parseRangeHeader(input.rangeHeader, file.size)
+
+  if (parsed.kind === 'unsatisfiable') {
+    return new Response(null, {
+      status: 416,
+      headers: { ...headers, 'content-range': `bytes */${file.size}` },
+    })
+  }
+
+  if (parsed.kind === 'range') {
+    const { start, end } = parsed
+    return new Response(file.slice(start, end + 1), {
+      status: 206,
+      headers: {
+        ...headers,
+        'content-range': `bytes ${start}-${end}/${file.size}`,
+        'content-length': String(end - start + 1),
+      },
+    })
+  }
+
+  // `full`: no `Range` header, or one RFC 7233 requires us to ignore. Still an
+  // explicit whole-file slice rather than the bare `file` object — see the
+  // header comment and the `buildShareZip` doc comment above for why a raw
+  // `Bun.file(path)` must never reach `new Response()` while a `Range` header
+  // could be present, ignored or not.
+  return new Response(file.slice(0, file.size), {
+    headers: { ...headers, 'content-length': String(file.size) },
   })
 }
 

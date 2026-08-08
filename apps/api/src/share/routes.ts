@@ -279,6 +279,10 @@ export const shareRoutes = new Elysia({ name: 'shares' })
           // loop yields to the event loop; a disconnect cannot be delivered to a
           // starved loop.
           signal: request.signal,
+          // `buildShareZip` answers this itself via an explicit `.slice()`
+          // (zip.ts) — it must never fall through to a bare `Bun.file(path)`
+          // response while this could be present (see zip.ts's header comment).
+          rangeHeader: request.headers.get('range'),
         })
         response.headers.set('referrer-policy', 'no-referrer')
         return response
@@ -299,7 +303,7 @@ export const shareRoutes = new Elysia({ name: 'shares' })
         tags: ['Shares'],
         summary: 'Streaming ZIP of the whole share',
         description:
-          'Streams a `<slug>.zip` of original files (+ RAFs for full-role tokens) with a predicted Content-Length. view-role tokens 404.',
+          'Streams a `<slug>.zip` of original files (+ RAFs for full-role tokens) with a real Content-Length, supporting resume via a hand-parsed `Range` header (see zip.ts). view-role tokens 404.',
       },
     },
   )
