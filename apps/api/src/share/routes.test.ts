@@ -483,10 +483,19 @@ describe('GET /s/:slug/zip (role-gated)', () => {
     expect(res.headers.get('referrer-policy')).toBe('no-referrer')
   })
 
-  // The `Range` header is threaded from the route into `buildShareZip` (zip.ts
-  // owns every shape — this just pins that the route wires it through and that
-  // role gating / the opaque 404 are unaffected by its presence).
-  describe('Range header wiring', () => {
+  // `Range` support was attempted twice and removed (zip.ts's header comment)
+  // — this route adds no `Range` handling of its own. `app.handle()` is
+  // Elysia's direct-call test harness: it never goes through a real
+  // `Bun.serve`/uWS socket, so it cannot observe Bun 1.3.14's own native
+  // `Range` dispatch either (that dispatch is applied at the HTTP-server
+  // boundary, which this harness bypasses entirely) — every shape gets a
+  // literal 200 here. That is a real property (this route's own code path
+  // adds nothing), but it is NOT the full production picture: over an actual
+  // socket a syntactically valid single-range header still gets a native
+  // 206/416 from Bun itself, unsuppressible from JS — see zip.test.ts's
+  // `Bun.serve`-based tests, which exercise the real wire path and pin that
+  // exact behavior.
+  describe('Range header: no handling of our own (see the app.handle() caveat above)', () => {
     const getRange = (path: string, range: string): Promise<Response> =>
       app.handle(new Request(`http://localhost${path}`, { headers: { range } }))
 
@@ -496,30 +505,21 @@ describe('GET /s/:slug/zip (role-gated)', () => {
       expect(await res.text()).toBe(OPAQUE)
     })
 
-    it('download: answers 206 with a correct Content-Range for a satisfiable range', async () => {
+    it('download: every Range shape gets a literal 200 through this harness, no Accept-Ranges', async () => {
       const whole = await (await get('/s/gallery/zip?token=dl-tk')).arrayBuffer()
-      const res = await getRange('/s/gallery/zip?token=dl-tk', 'bytes=0-9')
-      expect(res.status).toBe(206)
-      expect(res.headers.get('content-range')).toBe(`bytes 0-9/${whole.byteLength}`)
-      expect(res.headers.get('content-length')).toBe('10')
-      expect(new Uint8Array(await res.arrayBuffer())).toEqual(new Uint8Array(whole.slice(0, 10)))
-    })
-
-    it('download: an out-of-bounds range 416s with Content-Range: bytes */size', async () => {
-      const whole = await (await get('/s/gallery/zip?token=dl-tk')).arrayBuffer()
-      const res = await getRange(
-        '/s/gallery/zip?token=dl-tk',
-        `bytes=${whole.byteLength + 1000}-${whole.byteLength + 2000}`,
-      )
-      expect(res.status).toBe(416)
-      expect(res.headers.get('content-range')).toBe(`bytes */${whole.byteLength}`)
-    })
-
-    it('download: a malformed/multi-range/reversed Range header still serves the full 200 archive', async () => {
-      const whole = await (await get('/s/gallery/zip?token=dl-tk')).arrayBuffer()
-      for (const range of ['bytes=abc-def', 'bytes=0-99,200-299', 'bytes=500-100']) {
+      for (const range of [
+        'bytes=0-9',
+        'bytes=-5',
+        'bytes=500-',
+        'bytes=abc-def',
+        'bytes=0-99,200-299',
+        'bytes=500-100',
+        'bytes=999999999-999999999999',
+      ]) {
         const res = await getRange('/s/gallery/zip?token=dl-tk', range)
         expect(res.status).toBe(200)
+        expect(res.headers.get('accept-ranges')).toBeNull()
+        expect(res.headers.get('content-range')).toBeNull()
         expect((await res.arrayBuffer()).byteLength).toBe(whole.byteLength)
       }
     })

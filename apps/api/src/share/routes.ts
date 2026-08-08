@@ -279,10 +279,6 @@ export const shareRoutes = new Elysia({ name: 'shares' })
           // loop yields to the event loop; a disconnect cannot be delivered to a
           // starved loop.
           signal: request.signal,
-          // `buildShareZip` answers this itself via an explicit `.slice()`
-          // (zip.ts) — it must never fall through to a bare `Bun.file(path)`
-          // response while this could be present (see zip.ts's header comment).
-          rangeHeader: request.headers.get('range'),
         })
         response.headers.set('referrer-policy', 'no-referrer')
         return response
@@ -301,9 +297,9 @@ export const shareRoutes = new Elysia({ name: 'shares' })
       query: z.object({ token: z.string().optional() }),
       detail: {
         tags: ['Shares'],
-        summary: 'Streaming ZIP of the whole share',
+        summary: 'ZIP of the whole share',
         description:
-          'Streams a `<slug>.zip` of original files (+ RAFs for full-role tokens) with a real Content-Length, supporting resume via a hand-parsed `Range` header (see zip.ts). view-role tokens 404.',
+          "Serves a `<slug>.zip` of original files (+ RAFs for full-role tokens) with a real Content-Length. This route implements no `Range` support of its own (see zip.ts); a syntactically valid single-range header may still get a 206/416 from Bun's own native, unsuppressible dispatch, but it can no longer diverge from the real archive bytes the way the removed per-request implementation could. A dropped download restarts from zero rather than resuming, though a retry is served from the spool cache rather than rebuilt. view-role tokens 404.",
       },
     },
   )

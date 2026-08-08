@@ -581,56 +581,92 @@ Routes (all under `/s`, public):
   `estimateShareZipBytes` label (§7 share page) is unchanged and still useful as an up-front size
   hint on the page itself.
 
-  *`Range` needed a second fix — Bun's own dispatch for it is unsafe at production scale.* An earlier
-  version of this section claimed "Bun answers a byte-range request against a `Bun.file` response
-  with its own 206 + `Content-Range` natively (verified on 1.3.14)". True in isolation, false as
-  deployment advice: `curl -r 100-200` against the live `segeln-25` archive (19 GB, spinning disk)
-  got a 502 after 8.8 s with a 16-byte body; the identical request against `http://localhost:7720`
-  *inside* the container — ruling out Cloudflare and Caddy both — never answered at all, and
-  `GET /health` failed its 5 s timeout within seconds and kept failing until Docker restarted the
-  container (~1m45s later, RestartCount 1→2, `ExitCode 0`, not OOM). Reproduced twice,
-  deterministically. A plain (non-range) request against the same archive immediately after the
-  restart was fine (200, ttfb 0.08 s), so this was specific to the `Range` path, not the spool or the
-  plain file response.
+  **`Range` was attempted twice and REMOVED — do not re-add it.** An earlier version of this section
+  claimed "Bun answers a byte-range request against a `Bun.file` response with its own 206 +
+  `Content-Range` natively (verified on 1.3.14)". True in isolation, false as deployment advice:
+  `curl -r 100-200` against the live `segeln-25` archive (19 GB, spinning disk) got a 502 after 8.8 s
+  with a 16-byte body; the identical request against `http://localhost:7720` *inside* the container —
+  ruling out Cloudflare and Caddy both — never answered at all, and `GET /health` failed its 5 s
+  timeout within seconds and kept failing until Docker restarted the container (~1m45s later,
+  RestartCount 1→2, `ExitCode 0`, not OOM). That led to a second attempt: `Range` hand-parsed in
+  `zip.ts` (RFC 7233 §2.1 single-range-spec grammar) and answered via an explicit
+  `Bun.file(path).slice(start, end)`, on the theory that Bun's automatic dispatch — unconditional and
+  unsuppressible from JS for a bare, un-sliced `Bun.file()` body — was the whole problem and a
+  slice-based answer would sidestep it.
 
-  What's actually true on 1.3.14 (verified locally; the hang itself never reproduced there —
-  macOS/SSD, up to 3 GiB, every offset shape answered in single-digit ms — only the mechanism did):
-  Bun's automatic `Range` handling for a raw, un-sliced `Bun.file()` response body is unconditional
-  and **cannot be suppressed from JS** — an explicit `status: 200` on the returned `Response` is
-  silently overridden back to 206 whenever the incoming request carries a `Range` header, and
-  deleting that header from the request object first changes nothing either. A response whose body
-  is instead an *explicit* `Bun.file(path).slice(start, end)` is a different code path that Bun does
-  not renegotiate against the incoming header, and is still `sendfile`-backed (measured flat ~94 MiB
-  RSS slicing a 3 GiB file to a stalled reader — same bound as the un-sliced case). `Bun.file(path)
-  .stream()` looked like an easy way to dodge the automatic dispatch but is not a safe one: it is a
-  `ReadableStream` body and inherits the exact backpressure bug (oven-sh/bun#32469) this whole
-  archive-spooling design exists to route around — measured RSS to 10+ GiB against the same 3 GiB
-  file and a stalled reader.
+  **That second fix took the container down too.** The decisive measurement, taken at the origin
+  inside the container (Cloudflare confirmed to return byte-identical numbers):
 
-  So `Range` is now hand-parsed (`zip.ts parseRangeHeader`, RFC 7233 §2.1 single-range-spec grammar)
-  and every outcome — no header, a satisfiable range, an unsatisfiable one, or one RFC 7233 says to
-  ignore (malformed syntax, a multi-range list, a reversed first-byte-pos>last-byte-pos spec) — is
-  answered via an explicit `.slice()`, never the bare `file` object, so Bun's own dispatch is never
-  reached: normal (`N-M`) and suffix (`-N`) and open-ended (`N-`) ranges get 206 + `Content-Range`;
-  out-of-bounds gets 416 + `Content-Range: bytes */<size>`; an absurdly large end offset is clamped to
-  `size - 1` rather than rejected; everything else falls back to the ordinary whole-archive 200. A 19
-  GB download that dies an hour in still **resumes** instead of restarting — that part of the original
-  intent holds — it is just no longer Bun's default behavior doing the work.
+  ```
+  curl -r 100-200 http://localhost:7720/s/prod-validation-fuji-5-star/zip?token=...
+    HTTP/1.1 206 Partial Content
+    Accept-Ranges: bytes
+    Content-Range: bytes 100-200/191797795      <- our header, correct
+    (NO Content-Length header at all)
+    actual bytes transferred: 191,797,695       <- start -> EOF, not start -> end
+  ```
 
-  *The cost, and the one open deployment question.* Time-to-first-byte is now the spool time, paid
-  once per (share, role, file-set). A friend's download-role archive (~2.75 GB of JPEGs, SSD) spools
-  in seconds; the owner's 19 GB full-role archive reads ~16.5 GB of RAFs off `/mnt/hdd` and can still
+  Our own `Content-Range` end was correct; the body still streamed to EOF regardless — the slice's
+  upper bound was silently lost somewhere in Elysia's response mapping (the missing `Content-Length`
+  is the tell: the body was being streamed, not served as a bounded file). Isolated on the same Linux
+  container OUTSIDE Elysia, a sliced `BunFile` response is honored exactly
+  (`Bun.serve({ fetch: () => new Response(Bun.file(p).slice(100, 201)) })` → 206,
+  `content-length: 101`, 101 bytes received) — so `Bun.file(...).slice()` itself is not the bug, going
+  through this Elysia route is. On the 191 MB archive that EOF-streaming was a survivable 14 s; on the
+  19 GB `segeln-25` archive, a 100-byte range request became a 19 GB transfer to a client that had
+  already gone away — the same wedge as before, on a different mechanism.
+
+  **So the hand-rolled `Range` parsing/branching is gone.** `zip.ts` implements no `Range` handling of
+  its own any more and `GET /s/:slug/zip` never sends `Accept-Ranges`. The body is still an *explicit*
+  `Bun.file(path).slice(0, file.size)`, never the bare `file` object — that part of the design
+  survives, as the same `sendfile`-backed, memory-flat body every other response on this route uses.
+
+  **This does NOT mean every `Range` request gets a literal 200 — verify before repeating that claim.**
+  An earlier draft of this fix assumed a full-span slice sidesteps Bun's automatic dispatch the way a
+  bare file cannot. Directly measured against `buildShareZip` behind a real `Bun.serve`, both with and
+  without Elysia in front of it (Bun 1.3.14): for a syntactically valid single-range header (`N-M`,
+  `-N`, `N-`) Bun's OWN native dispatch still answers 206 — or 416 out of bounds — for *any*
+  `Bun.file`/`Blob`-backed response body, full-span slice included, and this is unsuppressible from JS
+  (an explicit `status: 200` is silently overridden; deleting the incoming header first changes
+  nothing). Only Elysia's own `app.handle()` unit-test harness hides this, because it never reaches the
+  real `Bun.serve`/uWS boundary where the dispatch happens — a test built on it alone would wrongly
+  conclude `Range` is fully gone. A malformed, multi-range, or reversed `first > last` header — every
+  case RFC 7233 says to ignore — still falls through to the ordinary whole-archive 200, because Bun's
+  own parser ignores those too, matching the old hand-rolled `full` case exactly.
+
+  **What is actually different, and why it's safe now:** the removed per-request slice's declared
+  bounds (`Content-Range: bytes 100-200/…`) could diverge from what actually streamed
+  (`start -> EOF`) — that mismatch is what wedged. A full-span slice cannot diverge like that: whatever
+  sub-range Bun's own native dispatch serves out of it is always a true, in-bounds slice of the real,
+  complete archive, with `Content-Length` matching the actual byte count exactly. A 206/416 from this
+  route now is Bun's own correctly-bounded behavior, not a bug. `Bun.file(path).stream()` remains ruled
+  out for the reason it always was: it is a `ReadableStream` body and inherits the exact backpressure
+  bug (oven-sh/bun#32469) this whole archive-spooling design exists to route around — measured RSS to
+  10+ GiB against a 3 GiB file and a stalled reader. If a literal 200 on every `Range` shape is a hard
+  requirement rather than "no longer wedges", the fix is not more JS in this route — it is stripping
+  `Range` at the edge (Caddy/Cloudflare, before the origin ever sees it) or a Bun upgrade that changes
+  this dispatch.
+
+  *The cost, paid honestly.* A download that dies partway now **restarts from zero** rather than
+  resuming — that part of the original `Range` intent is gone. This is exactly why the spool cache
+  matters: the retry is a `sendfile` of an already-built archive, not a rebuild, so a dropped
+  connection costs a re-download, not a re-pack.
+
+  *The cost, and the one open deployment question.* Time-to-first-byte is the spool time, paid once
+  per (share, role, file-set). A friend's download-role archive (~2.75 GB of JPEGs, SSD) spools in
+  seconds; the owner's 19 GB full-role archive reads ~16.5 GB of RAFs off `/mnt/hdd` and can still
   exceed **Cloudflare's ~100 s origin-response timeout** (share.jkrumm.com is on the `cloudflared`
-  network), which 524s the first attempt. That is now a slow first attempt rather than a dead share:
-  the build survives the dropped connection and publishes, so the retry is served from the spool. The
+  network), which 524s the first attempt. That is a slow first attempt rather than a dead share: the
+  build survives the dropped connection and publishes, so the retry is served from the spool. The
   share page tells the visitor to expect it — the download control stays in its "preparing" state for
   an archive-sized window (`zipBytes` at a pessimistic 20 MB/s, clamped to 20 s…10 min) with a
   localized line saying the archive is being packed and will start on its own, instead of the fixed
   20 s that used to un-busy the button while minutes of build were still to come. If the first-attempt
   524 becomes annoying anyway, the fixes in order are: raise the tunnel's origin timeout in
   `homelab`; or upgrade past #32553 (`oven/bun:canary` pinned by digest, or 1.3.15/1.4.0 when it
-  ships) and drop the spool entirely — at which point the streamed response becomes correct again and
-  the only reason to keep spooling is `Range` support.
+  ships) and drop the spool entirely — at which point the streamed response becomes correct again.
+  `Range` is not coming back either way; the earlier reasoning for it (resumable multi-GB downloads)
+  is superseded by the spool cache making a retry cheap regardless.
 
 `token` is threaded into every asset URL by the page renderer.
 
