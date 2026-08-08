@@ -1,5 +1,6 @@
 import { createRouter } from '@tanstack/react-router'
 import { queryClient } from './query-client'
+import { RouteErrorComponent, RouteNotFound } from '../features/common/route-error'
 import { routeTree } from '../routeTree.gen'
 
 export const router = createRouter({
@@ -10,6 +11,10 @@ export const router = createRouter({
   context: { queryClient },
   defaultPreload: 'intent',
   defaultPreloadStaleTime: 0,
+  // Without these a thrown render error unmounts the whole app to a blank page
+  // and an unknown /admin URL renders nothing. Both keep the shell around.
+  defaultErrorComponent: RouteErrorComponent,
+  defaultNotFoundComponent: RouteNotFound,
 })
 
 declare module '@tanstack/react-router' {

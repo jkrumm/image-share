@@ -23,10 +23,12 @@ export type ShareDto = {
   id: number
   slug: string
   title: string
-  sourceType: 'folder' | 'selection'
+  sourceType: 'folder' | 'selection' | 'album'
   root: ShareRoot | null
   dir: string | null
-  /** Folder shares: include images in sub-directories of `dir`. */
+  /** Album shares: the hierarchical keyword path, e.g. `Ereignisse|Segeln 25`. */
+  album: string | null
+  /** Folder shares: sub-directories of `dir`. Album shares: sub-albums of `album`. */
   recursive: boolean
   minRating: number | null
   expiresAt: string | null
@@ -38,13 +40,30 @@ export type ShareDto = {
 
 export type ShareDetailDto = ShareDto & { images: ImageDto[] }
 
+/**
+ * The `source` POST /api/shares accepts.
+ *
+ * `recursive` and `minRating` are REQUIRED here even though the server defaults
+ * them, and that is load-bearing: the create-share count preview hits
+ * GET /api/library/images with this exact object, so any field the client
+ * leaves to a server default is a field the preview and the share can disagree
+ * on. State the whole scope, preview the whole scope, ship the whole scope.
+ */
 export type ShareSourceInput =
   | {
       type: 'folder'
       root: ShareRoot
       dir: string
-      recursive?: boolean
-      minRating?: number | null
+      recursive: boolean
+      minRating: number | null
+    }
+  | {
+      type: 'album'
+      root: ShareRoot
+      /** Hierarchical keyword path from GET /api/library/albums, e.g. `Ereignisse|Segeln 25`. */
+      album: string
+      recursive: boolean
+      minRating: number | null
     }
   | { type: 'selection'; imageIds: number[] }
 
@@ -53,6 +72,8 @@ export type CreateShareInput = {
   title: string
   note?: string | null
   expiresAt?: string | null
+  /** Role of the initial minted token — the server defaults to `view`. */
+  role?: TokenRole
   source: ShareSourceInput
 }
 
@@ -63,6 +84,8 @@ export type UpdateShareInput = {
   expiresAt?: string | null
   minRating?: number | null
   recursive?: boolean
+  /** Album shares only — re-targets the hierarchical keyword path. */
+  album?: string
   imageIds?: number[]
 }
 
@@ -92,7 +115,8 @@ function invalidateShares(qc: ReturnType<typeof useQueryClient>) {
 export function useCreateShare() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (body: CreateShareInput) => unwrap(client.api.shares.post(body)),
+    mutationFn: (body: CreateShareInput) =>
+      unwrap(client.api.shares.post(body)) as Promise<ShareDto>,
     onSuccess: () => invalidateShares(qc),
   })
 }
@@ -126,7 +150,9 @@ export function useAddShareToken() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: ({ id, role, label }: { id: number; role: TokenRole; label?: string | null }) =>
-      unwrap(client.api.shares({ id: String(id) }).tokens.post({ role, label })),
+      unwrap(
+        client.api.shares({ id: String(id) }).tokens.post({ role, label }),
+      ) as Promise<TokenDto>,
     onSuccess: () => invalidateShares(qc),
   })
 }

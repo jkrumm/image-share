@@ -7,6 +7,7 @@
     "dev": "vite --port 7721 --strictPort",
     "build": "tsr generate && vite build",
     "preview": "vite preview --port 7721 --strictPort",
+    "test": "bun test",
     "typecheck": "tsr generate && tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json"
   },
   "dependencies": {

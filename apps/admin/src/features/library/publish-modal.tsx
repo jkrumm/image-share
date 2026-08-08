@@ -1,6 +1,6 @@
 import { Button, Modal, Select, Stack, Text } from '@mantine/core'
 import { useState } from 'react'
-import { notifyPromise } from 'basalt-ui/notifications'
+import { notifyMutation } from '../common'
 import { usePublishImages, type PublishInput } from '../../lib/queries/library'
 
 const PREFIX_OPTIONS: { value: PublishInput['prefix']; label: string }[] = [
@@ -21,14 +21,14 @@ export function PublishModal({ imageIds, opened, onClose }: Props) {
   const publish = usePublishImages()
 
   function handlePublish() {
-    notifyPromise(publish.mutateAsync({ imageIds, prefix }), {
+    void notifyMutation(publish.mutateAsync({ imageIds, prefix }), {
       loading: `Publishing ${imageIds.length} image(s)…`,
       success: 'Published to the CDN',
       error: 'Publish failed',
     })
       .then(onClose)
       .catch(() => {
-        /* toast already shown by notifyPromise */
+        /* notifyMutation already surfaced the real server message */
       })
   }
 

@@ -6,7 +6,7 @@
   ],
   "scripts": {
     "dev": "./scripts/dev.sh",
-    "test": "bun test --cwd apps/api --isolate",
+    "test": "bun run --cwd apps/api test && bun run --cwd apps/admin test",
     "typecheck": "tsc --noEmit -p apps/api && bun run --cwd apps/admin typecheck",
     "lint": "oxlint .",
     "lint:fix": "oxlint --fix .",

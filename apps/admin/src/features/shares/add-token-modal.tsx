@@ -1,43 +1,41 @@
 import { Button, Modal, Select, Stack, TextInput } from '@mantine/core'
-import { useState } from 'react'
-import { notifyPromise } from 'basalt-ui/notifications'
-import { useAddShareToken, type TokenRole } from '../../lib/queries/shares'
+import { useState, type ReactNode } from 'react'
+import { notifyMutation } from '../common'
+import { useAddShareToken, type TokenDto, type TokenRole } from '../../lib/queries/shares'
+import { ROLE_OPTIONS } from './token-role'
 
 type Props = {
   shareId: number
   opened: boolean
   onClose: () => void
+  /** Handed the minted token so the caller can highlight, scroll to and copy it. */
+  onCreated?: (token: TokenDto) => void
 }
 
-const ROLE_OPTIONS: { value: TokenRole; label: string }[] = [
-  { value: 'view', label: 'View — thumb/med only, no downloads' },
-  { value: 'download', label: 'Download — + full size, original download, zip' },
-  { value: 'full', label: 'Full — + paired RAW download' },
-]
-
 /** Mints an additional token on an existing share with a chosen role + label. */
-export function AddTokenModal({ shareId, opened, onClose }: Props) {
+export function AddTokenModal({ shareId, opened, onClose, onCreated }: Props): ReactNode {
   const [role, setRole] = useState<TokenRole>('view')
   const [label, setLabel] = useState('')
   const addToken = useAddShareToken()
 
   function handleSubmit() {
-    void notifyPromise(
+    void notifyMutation(
       addToken.mutateAsync({ id: shareId, role, label: label === '' ? null : label }),
-      { loading: 'Minting token…', success: 'Token added', error: 'Could not add token' },
+      { loading: 'Minting link…', success: 'Link added', error: 'Could not add link' },
     )
-      .then(() => {
+      .then((token) => {
         setRole('view')
         setLabel('')
         onClose()
+        onCreated?.(token)
       })
       .catch(() => {
-        /* toast already shown by notifyPromise */
+        /* the real server message is already on screen */
       })
   }
 
   return (
-    <Modal opened={opened} onClose={onClose} title="Add a token" size="sm">
+    <Modal opened={opened} onClose={onClose} title="Add a link" size="sm">
       <Stack gap="sm">
         <Select
           label="Role"
@@ -47,13 +45,14 @@ export function AddTokenModal({ shareId, opened, onClose }: Props) {
           allowDeselect={false}
         />
         <TextInput
-          label="Label (optional)"
+          label="Who it is for"
+          description="Optional label — shown only to you"
           placeholder="e.g. grandma"
           value={label}
           onChange={(e) => setLabel(e.currentTarget.value)}
         />
         <Button onClick={handleSubmit} loading={addToken.isPending}>
-          Add token
+          Add link
         </Button>
       </Stack>
     </Modal>

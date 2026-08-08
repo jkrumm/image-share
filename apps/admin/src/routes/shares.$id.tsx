@@ -1,38 +1,36 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import {
-  ActionIcon,
-  Anchor,
-  AspectRatio,
   Accordion,
-  Badge,
+  Anchor,
   Button,
   Checkbox,
-  CopyButton,
   Group,
-  Image,
-  Loader,
-  NumberInput,
-  SimpleGrid,
   Stack,
   Text,
   TextInput,
   Textarea,
   Tooltip,
 } from '@mantine/core'
+import { useClipboard } from '@mantine/hooks'
 import { modals } from '@mantine/modals'
-import { z } from 'zod'
 import { DangerZone, EmptyState } from 'basalt-ui'
 import { field, FormErrorSummary, useBasaltForm } from 'basalt-ui/forms'
-import { notifyPromise } from 'basalt-ui/notifications'
+import { QueryState, notifyMutation } from '../features/common'
 import { AddTokenModal } from '../features/shares/add-token-modal'
+import { MinRatingInput } from '../features/shares/min-rating-input'
 import {
-  ROLE_COLOR,
-  ROLE_DESCRIPTION,
-  ROLE_LABEL,
-  activeTokens,
-} from '../features/shares/token-role'
-import { imageFileUrl } from '../lib/eden'
+  SettingsFormSchema,
+  settingsInitialValues,
+  toUpdateSharePatch,
+  type SettingsFormValues,
+} from '../features/shares/share-forms'
+import { ShareImages } from '../features/shares/share-images'
+import { TokenRow } from '../features/shares/token-row'
+import { activeTokens, sortTokens } from '../features/shares/token-role'
+import { errorStatus } from '../lib/eden'
+import { formatDate, formatDateTime, formatNumber, formatRelative } from '../lib/format'
+import type { ImageDto } from '../lib/queries/library'
 import {
   useDeleteShare,
   useRevokeShareToken,
@@ -40,7 +38,6 @@ import {
   useShare,
   useUpdateShare,
   type ShareDetailDto,
-  type TokenDto,
 } from '../lib/queries/shares'
 
 export const Route = createFileRoute('/shares/$id')({
@@ -49,17 +46,72 @@ export const Route = createFileRoute('/shares/$id')({
 
 function sourceLine(share: ShareDetailDto): string {
   if (share.sourceType === 'selection') {
-    return `Selection · ${share.images.length} image${share.images.length === 1 ? '' : 's'}`
+    return `Selection · ${formatNumber(share.images.length)} image${share.images.length === 1 ? '' : 's'}`
   }
+  const scope = share.recursive
+    ? share.sourceType === 'album'
+      ? '(incl. sub-albums)'
+      : '(incl. subfolders)'
+    : share.sourceType === 'album'
+      ? '(this album only)'
+      : '(this folder only)'
+  const rating = share.minRating ? ` · ${share.minRating}★ and up` : ''
+  if (share.sourceType === 'album') return `Album ${share.root}/${share.album} ${scope}${rating}`
   const label = share.dir ? `${share.root}/${share.dir}` : share.root
-  return `Folder ${label} ${share.recursive ? '(incl. subfolders)' : '(this folder only)'}`
+  return `Folder ${label} ${scope}${rating}`
 }
 
-function ShareDetailPage() {
+function ShareDetailPage(): ReactNode {
   const { id } = Route.useParams()
   const shareId = Number(id)
+  const query = useShare(shareId)
+
+  const backLink = (
+    <Anchor component={Link} to="/shares" size="sm" c="dimmed">
+      ← All shares
+    </Anchor>
+  )
+
+  // A real 404 is the ONLY case that means "deleted". Everything else — a 500,
+  // a dropped connection, an expired bearer — used to render as a deletion.
+  if (query.isError && query.data === undefined && errorStatus(query.error) === 404) {
+    return (
+      <Stack gap="lg">
+        {backLink}
+        <EmptyState
+          title="Share not found"
+          description="It was deleted, or the link you followed points at an id that never existed."
+          action={
+            <Button component={Link} to="/shares">
+              Back to shares
+            </Button>
+          }
+        />
+      </Stack>
+    )
+  }
+
+  return (
+    <Stack gap="lg">
+      {backLink}
+      <QueryState
+        query={query}
+        errorTitle="Could not load this share"
+        errorAction={
+          <Button component={Link} to="/shares" size="xs" variant="subtle">
+            Back to shares
+          </Button>
+        }
+      >
+        {(share) => <ShareDetail share={share} />}
+      </QueryState>
+    </Stack>
+  )
+}
+
+function ShareDetail({ share }: { share: ShareDetailDto }): ReactNode {
   const navigate = useNavigate()
-  const { data: share, isLoading } = useShare(shareId)
+  const clipboard = useClipboard({ timeout: 2000 })
 
   const updateShare = useUpdateShare()
   const deleteShare = useDeleteShare()
@@ -70,28 +122,28 @@ function ShareDetailPage() {
   const [titleDraft, setTitleDraft] = useState('')
   const [showRevoked, setShowRevoked] = useState(false)
   const [addTokenOpened, setAddTokenOpened] = useState(false)
+  const [highlightTokenId, setHighlightTokenId] = useState<number | null>(null)
 
-  if (isLoading) return <Loader size="sm" />
-  if (!share) return <EmptyState title="Share not found" description="It may have been deleted." />
+  const shareId = share.id
 
   function startEditTitle() {
-    setTitleDraft(share!.title)
+    setTitleDraft(share.title)
     setIsEditingTitle(true)
   }
 
   function saveTitle() {
-    if (titleDraft.trim() === '' || titleDraft === share!.title) {
+    if (titleDraft.trim() === '' || titleDraft === share.title) {
       setIsEditingTitle(false)
       return
     }
-    void notifyPromise(updateShare.mutateAsync({ id: shareId, title: titleDraft }), {
+    void notifyMutation(updateShare.mutateAsync({ id: shareId, title: titleDraft }), {
       loading: 'Saving title…',
       success: 'Title updated',
       error: 'Could not update title',
     })
       .then(() => setIsEditingTitle(false))
       .catch(() => {
-        /* toast already shown by notifyPromise */
+        /* the real server message is already on screen */
       })
   }
 
@@ -100,17 +152,19 @@ function ShareDetailPage() {
       title: 'Roll all active links',
       children: (
         <Text size="sm">
-          Revokes every active link for &quot;{share!.title}&quot; and mints a same-role replacement
+          Revokes every active link for &quot;{share.title}&quot; and mints a same-role replacement
           for each. Existing links stop working immediately.
         </Text>
       ),
       labels: { confirm: 'Roll links', cancel: 'Cancel' },
       confirmProps: { color: 'orange' },
       onConfirm: () => {
-        void notifyPromise(rollToken.mutateAsync(shareId), {
+        void notifyMutation(rollToken.mutateAsync(shareId), {
           loading: 'Rolling links…',
           success: 'Links rolled',
           error: 'Could not roll links',
+        }).catch(() => {
+          /* the real server message is already on screen */
         })
       },
     })
@@ -123,21 +177,38 @@ function ShareDetailPage() {
       labels: { confirm: 'Revoke', cancel: 'Cancel' },
       confirmProps: { color: 'red' },
       onConfirm: () => {
-        void notifyPromise(revokeToken.mutateAsync({ id: shareId, tokenId }), {
+        void notifyMutation(revokeToken.mutateAsync({ id: shareId, tokenId }), {
           loading: 'Revoking link…',
           success: 'Link revoked',
           error: 'Could not revoke link',
+        }).catch(() => {
+          /* the real server message is already on screen */
         })
       },
     })
   }
 
-  function handleRemoveImage(imageId: number) {
-    const remaining = share!.images.map((image) => image.id).filter((id_) => id_ !== imageId)
-    void notifyPromise(updateShare.mutateAsync({ id: shareId, imageIds: remaining }), {
-      loading: 'Removing image…',
-      success: 'Image removed',
-      error: 'Could not remove image',
+  function handleRemoveImage(image: ImageDto) {
+    modals.openConfirmModal({
+      title: 'Remove from share',
+      children: (
+        <Text size="sm">
+          Remove {image.stem}.{image.ext} from &quot;{share.title}&quot;? The file itself is not
+          touched — you can add it back from the Library.
+        </Text>
+      ),
+      labels: { confirm: 'Remove', cancel: 'Cancel' },
+      confirmProps: { color: 'red' },
+      onConfirm: () => {
+        const remaining = share.images.map((i) => i.id).filter((id) => id !== image.id)
+        void notifyMutation(updateShare.mutateAsync({ id: shareId, imageIds: remaining }), {
+          loading: 'Removing image…',
+          success: 'Image removed',
+          error: 'Could not remove image',
+        }).catch(() => {
+          /* the real server message is already on screen */
+        })
+      },
     })
   }
 
@@ -146,34 +217,30 @@ function ShareDetailPage() {
       title: 'Delete share',
       children: (
         <Text size="sm">
-          Delete &quot;{share!.title}&quot;? All its links stop working immediately. This cannot be
+          Delete &quot;{share.title}&quot;? All its links stop working immediately. This cannot be
           undone.
         </Text>
       ),
       labels: { confirm: 'Delete', cancel: 'Cancel' },
       confirmProps: { color: 'red' },
       onConfirm: () => {
-        void notifyPromise(deleteShare.mutateAsync(shareId), {
+        void notifyMutation(deleteShare.mutateAsync(shareId), {
           loading: 'Deleting share…',
           success: 'Share deleted',
           error: 'Could not delete share',
         })
           .then(() => void navigate({ to: '/shares' }))
           .catch(() => {
-            /* toast already shown by notifyPromise */
+            /* the real server message is already on screen */
           })
       },
     })
   }
 
-  const tokens = showRevoked ? share.tokens : activeTokens(share.tokens)
+  const tokens = sortTokens(showRevoked ? share.tokens : activeTokens(share.tokens))
 
   return (
-    <Stack gap="lg">
-      <Anchor component={Link} to="/shares" size="sm" c="dimmed">
-        ← All shares
-      </Anchor>
-
+    <>
       <Stack gap={4}>
         {isEditingTitle ? (
           <Group gap="xs">
@@ -207,6 +274,12 @@ function ShareDetailPage() {
         <Text size="sm" c="dimmed">
           {sourceLine(share)}
         </Text>
+        <Tooltip label={formatDateTime(share.createdAt)}>
+          <Text size="xs" c="dimmed">
+            Created {formatRelative(share.createdAt)}
+            {share.expiresAt !== null && ` · expires ${formatDate(share.expiresAt)}`}
+          </Text>
+        </Tooltip>
       </Stack>
 
       <Stack gap="sm">
@@ -228,64 +301,49 @@ function ShareDetailPage() {
 
         {tokens.length === 0 && (
           <Text size="sm" c="dimmed">
-            No links yet.
+            No links yet — nobody can open this share.
           </Text>
         )}
 
         {tokens.map((token) => (
-          <TokenRow key={token.id} token={token} onRevoke={() => handleRevoke(token.id)} />
+          <TokenRow
+            key={token.id}
+            token={token}
+            highlighted={token.id === highlightTokenId}
+            onRevoke={() => handleRevoke(token.id)}
+          />
         ))}
 
-        <Group>
+        <Group gap="xs">
           <Button size="xs" variant="light" onClick={() => setAddTokenOpened(true)}>
             Add link
           </Button>
+          {highlightTokenId !== null && (
+            <Text size="xs" c="dimmed">
+              {clipboard.copied ? 'New link copied to clipboard' : 'New link highlighted above'}
+            </Text>
+          )}
         </Group>
       </Stack>
 
       <Stack gap="sm">
         <Text fw={600}>Images</Text>
-        {share.sourceType === 'folder' && (
+        {share.sourceType !== 'selection' && (
           <Text size="xs" c="dimmed">
-            Content follows the folder automatically — remove images by moving/rating them in the
-            library, not here.
+            Content follows the {share.sourceType} automatically — change what is in it by re-rating
+            or re-tagging in the library, or by adjusting the scope in Settings.
           </Text>
         )}
-        {share.images.length === 0 && (
+        {share.images.length === 0 ? (
           <Text size="sm" c="dimmed">
             No images in this share yet.
           </Text>
-        )}
-        {share.images.length > 0 && (
-          <SimpleGrid cols={{ base: 3, sm: 4, md: 6, lg: 8 }} spacing="xs">
-            {share.images.map((image) => (
-              <div key={image.id} style={{ position: 'relative' }}>
-                {share.sourceType === 'selection' && (
-                  <ActionIcon
-                    size="sm"
-                    color="red"
-                    variant="filled"
-                    pos="absolute"
-                    top={4}
-                    right={4}
-                    style={{ zIndex: 1 }}
-                    aria-label="Remove from share"
-                    onClick={() => handleRemoveImage(image.id)}
-                  >
-                    ✕
-                  </ActionIcon>
-                )}
-                <AspectRatio ratio={1}>
-                  <Image
-                    src={imageFileUrl(image.id, 'thumb')}
-                    alt={image.stem}
-                    fit="cover"
-                    radius="sm"
-                  />
-                </AspectRatio>
-              </div>
-            ))}
-          </SimpleGrid>
+        ) : (
+          <ShareImages
+            images={share.images}
+            removing={updateShare.isPending}
+            {...(share.sourceType === 'selection' && { onRemove: handleRemoveImage })}
+          />
         )}
       </Stack>
 
@@ -308,98 +366,37 @@ function ShareDetailPage() {
         shareId={shareId}
         opened={addTokenOpened}
         onClose={() => setAddTokenOpened(false)}
+        onCreated={(token) => {
+          setHighlightTokenId(token.id)
+          // Best effort: the row is highlighted and carries its own Copy
+          // button, so a clipboard rejection costs nothing.
+          clipboard.copy(token.url)
+        }}
       />
-    </Stack>
+    </>
   )
 }
 
-function TokenRow({ token, onRevoke }: { token: TokenDto; onRevoke: () => void }) {
-  const revoked = token.revokedAt !== null
-  return (
-    <Group
-      justify="space-between"
-      wrap="wrap"
-      style={{ opacity: revoked ? 0.5 : 1, textDecoration: revoked ? 'line-through' : undefined }}
-    >
-      <Group gap="xs" wrap="wrap">
-        <Tooltip label={ROLE_DESCRIPTION[token.role]}>
-          <Badge color={ROLE_COLOR[token.role]} variant="light">
-            {ROLE_LABEL[token.role]}
-          </Badge>
-        </Tooltip>
-        {token.label && (
-          <Text size="sm" c="dimmed">
-            {token.label}
-          </Text>
-        )}
-        <Text size="sm" ff="monospace">
-          {token.url}
-        </Text>
-        <Text size="xs" c="dimmed">
-          created {token.createdAt}
-          {revoked && ` · revoked ${token.revokedAt}`}
-        </Text>
-      </Group>
-      <Group gap="xs">
-        <CopyButton value={token.url}>
-          {({ copied, copy }) => (
-            <Button size="xs" variant="default" onClick={copy}>
-              {copied ? 'Copied' : 'Copy'}
-            </Button>
-          )}
-        </CopyButton>
-        {!revoked && (
-          <Button size="xs" variant="subtle" color="red" onClick={onRevoke}>
-            Revoke
-          </Button>
-        )}
-      </Group>
-    </Group>
-  )
-}
-
-const SettingsFormSchema = z.object({
-  note: z.string(),
-  expiresAt: z.string(),
-  minRating: z.union([z.number().int().min(0).max(5), z.literal('')]),
-  recursive: z.boolean(),
-})
-
-type SettingsFormValues = z.infer<typeof SettingsFormSchema>
-
-function ShareSettingsForm({ share }: { share: ShareDetailDto }) {
+function ShareSettingsForm({ share }: { share: ShareDetailDto }): ReactNode {
   const updateShare = useUpdateShare()
   const form = useBasaltForm<SettingsFormValues>({
-    initialValues: {
-      note: share.note ?? '',
-      expiresAt: share.expiresAt ?? '',
-      minRating: share.minRating ?? '',
-      recursive: share.recursive,
-    },
+    initialValues: settingsInitialValues(share),
     schema: SettingsFormSchema,
     mode: 'controlled',
   })
 
+  // minRating and recursive are folder- AND album-scope fields; PATCH rejects
+  // both only on a selection share.
+  const scoped = share.sourceType !== 'selection'
+
   function handleSubmit(values: SettingsFormValues) {
-    void notifyPromise(
-      updateShare.mutateAsync({
-        id: share.id,
-        note: values.note === '' ? null : values.note,
-        expiresAt: values.expiresAt === '' ? null : values.expiresAt,
-        // Both are folder-only server-side (PATCH rejects `recursive` on a
-        // selection share), so only send them for a folder share.
-        ...(share.sourceType === 'folder'
-          ? {
-              // 0 is "no filter", same as the create modal — storing a literal
-              // 0 would mean `rating >= 0`, which drops every unrated image.
-              minRating:
-                values.minRating === '' || values.minRating === 0 ? null : values.minRating,
-              recursive: values.recursive,
-            }
-          : {}),
-      }),
-      { loading: 'Saving settings…', success: 'Settings saved', error: 'Could not save settings' },
-    )
+    void notifyMutation(updateShare.mutateAsync(toUpdateSharePatch(share, values)), {
+      loading: 'Saving settings…',
+      success: 'Settings saved',
+      error: 'Could not save settings',
+    }).catch(() => {
+      /* the real server message is already on screen */
+    })
   }
 
   return (
@@ -419,19 +416,19 @@ function ShareSettingsForm({ share }: { share: ShareDetailDto }) {
           description="Empty means no expiry"
           {...field(form, 'expiresAt')}
         />
-        {share.sourceType === 'folder' && (
+        {scoped && (
           <>
-            <NumberInput
-              label="Minimum rating"
-              placeholder="Any"
-              description="Empty or 0 means no filter"
-              min={0}
-              max={5}
-              {...field(form, 'minRating')}
+            <MinRatingInput
+              value={form.values.minRating}
+              onChange={(v) => form.setFieldValue('minRating', v)}
             />
             <Checkbox
-              label="Include subfolders"
-              description="Off shares only the images directly in this folder"
+              label={share.sourceType === 'album' ? 'Include sub-albums' : 'Include subfolders'}
+              description={
+                share.sourceType === 'album'
+                  ? 'Off shares only the images tagged with this exact album'
+                  : 'Off shares only the images directly in this folder'
+              }
               checked={form.values.recursive}
               onChange={(e) => form.setFieldValue('recursive', e.currentTarget.checked)}
             />

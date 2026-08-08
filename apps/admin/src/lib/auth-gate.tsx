@@ -1,7 +1,8 @@
 import { Button, Center, Container, Loader, PasswordInput, Stack, Text, Title } from '@mantine/core'
 import { field, useBasaltForm } from 'basalt-ui/forms'
-import type { ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { z } from 'zod'
+import { ErrorState } from '../features/common/query-state'
 import { useAssetToken, useAssetTokenStore } from './asset-token'
 import { useAuthStore } from './auth'
 
@@ -29,17 +30,63 @@ export function AuthGate({ children }: Props) {
 // an empty token — every thumbnail 401s and only recovers on the next
 // re-render. Subscribing to the store makes this gate re-render when the
 // token actually lands, so children never see a null token.
+//
+// A failed mint is terminal for the whole admin (no token, no thumbnails), so
+// it gets a real error state rather than the bare spinner that used to sit here
+// forever on any non-401 failure.
 function AssetTokenGate({ children }: Props) {
-  useAssetToken()
+  const query = useAssetToken()
   const assetToken = useAssetTokenStore((s) => s.token)
-  if (!assetToken) {
+  const clearAuthToken = useAuthStore((s) => s.clearToken)
+  const slow = useSlowFlag(!assetToken && !query.isError)
+
+  if (assetToken) return <>{children}</>
+
+  if (query.isError) {
     return (
-      <Center h="100vh">
-        <Loader />
-      </Center>
+      <Container size="sm" pt={120} pb={64}>
+        <ErrorState
+          error={query.error}
+          title="Could not start the admin"
+          fallback="Minting the image asset token failed. The API may be down."
+          onRetry={() => void query.refetch()}
+          retrying={query.fetchStatus === 'fetching'}
+          action={
+            <Button size="xs" variant="subtle" onClick={clearAuthToken}>
+              Use a different token
+            </Button>
+          }
+        />
+      </Container>
     )
   }
-  return <>{children}</>
+
+  return (
+    <Center h="100vh">
+      <Stack align="center" gap="sm">
+        <Loader />
+        {slow && (
+          <Text size="sm" c="dimmed">
+            Still waiting for the API…
+          </Text>
+        )}
+      </Stack>
+    </Center>
+  )
+}
+
+/** True once `active` has been continuously true for 8s — turns a silent spinner into a hint. */
+function useSlowFlag(active: boolean): boolean {
+  const [slow, setSlow] = useState(false)
+  useEffect(() => {
+    if (!active) {
+      setSlow(false)
+      return
+    }
+    const timer = setTimeout(() => setSlow(true), 8000)
+    return () => clearTimeout(timer)
+  }, [active])
+  return slow
 }
 
 function TokenPrompt() {
