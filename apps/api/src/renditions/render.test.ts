@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
+import { afterAll, beforeAll, describe, expect, it, spyOn } from 'bun:test'
 import { mkdtemp, rm, stat, unlink, utimes } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -363,6 +363,103 @@ describe('rendition concurrency gate', () => {
 
     expect(observedMax).toBeGreaterThan(0) // the gate was actually exercised
     expect(observedMax).toBeLessThanOrEqual(2)
+    expect(renditionSlotStats()).toMatchObject({ inUse: 0, queued: 0 })
+  })
+})
+
+describe('sharp global configuration (design §6)', () => {
+  it('tunes sharp.concurrency and sharp.cache exactly once, even under a concurrent first-use burst, and never again after', async () => {
+    const concurrencySpy = spyOn(sharp, 'concurrency')
+    const cacheSpy = spyOn(sharp, 'cache')
+    concurrencySpy.mockClear()
+    cacheSpy.mockClear()
+
+    // A burst of distinct-key renders fired at once is N concurrent "first
+    // calls" to the lazy sharp loader. The promise-memoized guard must let
+    // exactly one of them run the configuration — never more, and it may
+    // legitimately be zero if an earlier test in this process already
+    // triggered the (process-wide, one-time-ever) configuration.
+    const firstBurst = await Promise.all(
+      Array.from({ length: 6 }, () => makeFixture({ width: 300, height: 200 })),
+    )
+    await Promise.all(
+      firstBurst.map((absPath, i) =>
+        renderRendition({
+          absPath,
+          size: 'thumb',
+          root: 'fuji',
+          relPath: nextRelPath(`sharp-config-first-${i}.jpg`),
+          mtimeMs: 1,
+          fileSize: 1,
+        }),
+      ),
+    )
+
+    expect(concurrencySpy.mock.calls.length).toBeLessThanOrEqual(1)
+    expect(cacheSpy.mock.calls.length).toBeLessThanOrEqual(1)
+    const afterFirstBurst = {
+      concurrency: concurrencySpy.mock.calls.length,
+      cache: cacheSpy.mock.calls.length,
+    }
+
+    // A later, unrelated burst must not reconfigure at all — the guard stays
+    // locked forever once sharp has been loaded once for this process.
+    const secondBurst = await Promise.all(
+      Array.from({ length: 4 }, () => makeFixture({ width: 300, height: 200 })),
+    )
+    await Promise.all(
+      secondBurst.map((absPath, i) =>
+        renderRendition({
+          absPath,
+          size: 'small',
+          root: 'fuji',
+          relPath: nextRelPath(`sharp-config-second-${i}.jpg`),
+          mtimeMs: 1,
+          fileSize: 1,
+        }),
+      ),
+    )
+
+    expect(concurrencySpy.mock.calls.length).toBe(afterFirstBurst.concurrency)
+    expect(cacheSpy.mock.calls.length).toBe(afterFirstBurst.cache)
+
+    concurrencySpy.mockRestore()
+    cacheSpy.mockRestore()
+  })
+
+  it('does not narrow the RENDITION_CONCURRENCY gate: 3 gated renders still run concurrently after sharp is configured', async () => {
+    env.RENDITION_CONCURRENCY = 3
+
+    const sources = await Promise.all(
+      Array.from({ length: 6 }, () => makeFixture({ width: 300, height: 200 })),
+    )
+
+    let observedMax = 0
+    const sampler = setInterval(() => {
+      observedMax = Math.max(observedMax, renditionSlotStats().inUse)
+    }, 1)
+
+    try {
+      await Promise.all(
+        sources.map((absPath, i) =>
+          renderRendition({
+            absPath,
+            size: 'thumb',
+            root: 'fuji',
+            relPath: nextRelPath(`sharp-config-gate-${i}.jpg`),
+            mtimeMs: 1,
+            fileSize: 1,
+          }),
+        ),
+      )
+    } finally {
+      clearInterval(sampler)
+    }
+
+    // sharp.concurrency(1) bounds libvips' OWN thread pool, not our semaphore
+    // — RENDITION_CONCURRENCY still gates up to 3 renders in flight.
+    expect(observedMax).toBeGreaterThan(0)
+    expect(observedMax).toBeLessThanOrEqual(3)
     expect(renditionSlotStats()).toMatchObject({ inUse: 0, queued: 0 })
   })
 })

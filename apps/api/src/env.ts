@@ -77,7 +77,9 @@ export const Env = z.object({
   // 26 MP Fuji decode costs ~450 ms plus a large pixel buffer — so an unbounded
   // burst (the first visitor to a cold 100-photo share fires ~100 renders at
   // once) is an OOM-kill candidate. 3 keeps the box busy without starving the
-  // event loop or stacking decode buffers past the memory limit.
+  // event loop or stacking decode buffers past the memory limit. This is the
+  // only rendition memory knob exposed via env — sharp's own libvips thread
+  // pool and operation cache are hardcoded, not tunable (render.ts `loadSharp`).
   RENDITION_CONCURRENCY: z.coerce.number().int().min(1).default(3),
 })
 

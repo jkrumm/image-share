@@ -97,6 +97,66 @@ export function renditionSlotStats(): { inUse: number; queued: number; acquired:
   return { inUse: slotsInUse, queued: slotWaiters.length, acquired: slotsAcquired }
 }
 
+// ── sharp global configuration (design §6) ──────────────────────────────────
+// Two knobs, tuned once — the first time sharp's native binding is actually
+// loaded (see `loadSharp` below), never at module scope, so importing this
+// file still never spawns the native binding at process boot.
+//
+// 1. `sharp.concurrency(1)`. libvips defaults its own worker-thread pool to
+//    the physical core count (4 on the HomeLab container). We ALREADY gate
+//    concurrent decodes process-wide via `withRenditionSlot`
+//    (RENDITION_CONCURRENCY, default 3) — so libvips' pool is redundant
+//    multiplication on top of our own gate, not extra throughput: worst case
+//    was 3 gated renders x 4 libvips threads = up to 12 worker threads, each
+//    potentially holding tile buffers for a 6240x4160 (26 MP) source, on a
+//    4-core box with a 1 GiB cgroup limit. Measured on the HomeLab: idle anon
+//    sits at 897-911 MiB of that 1 GiB limit (~89%), and a 40-concurrent
+//    cold-render burst pegged memory at exactly 1024.0 MiB. The box never
+//    OOM-killed during that burst (all 88 requests returned 200) because our
+//    own gate already caps decodes at 3 — CPU during a burst plateaus around
+//    2.7-3.0 cores, i.e. the box is already CPU-bound at the width of our OWN
+//    gate, so a wider libvips pool buys no extra throughput, only more
+//    concurrent buffers. One libvips thread per gated render (1 x 3 = 3
+//    worst-case threads, not 3 x 4 = 12) should hold throughput while cutting
+//    peak decode-buffer count roughly 4x.
+//
+// 2. `sharp.cache(false)`. libvips' operation cache defaults to 50 MB / 20
+//    files / 100 cached operations — built for workloads that repeat the same
+//    operation graph against the same source. Ours never does: every
+//    rendition is content-addressed and cached FOREVER on our own disk
+//    (renditions/cache.ts) the first time it's rendered, so a given source
+//    file is decoded at most 4 times ever (thumb/small/med/full) before every
+//    future request for it is served straight off disk without touching
+//    sharp again. libvips' in-memory cache is real RSS bought for a
+//    structurally near-zero hit rate in this workload — disable it outright
+//    rather than tune its limits down.
+//
+// Both are hardcoded, not env-tunable: they follow directly from facts that
+// don't vary by deployment ("we already gate concurrency ourselves", "we
+// already cache renditions on disk forever") rather than from anything about
+// the HomeLab box's specific core/memory shape that a future deployment might
+// need to override. RENDITION_CONCURRENCY (env.ts) remains the one exposed
+// knob for the actual pressure point — how many decodes run at once.
+let sharpModule: Promise<typeof import('sharp').default> | undefined
+
+/**
+ * Dynamically import sharp and configure it exactly once, no matter how many
+ * callers race to load it first. `sharpModule` is assigned synchronously (no
+ * `await` before the assignment), so concurrent first-callers all observe the
+ * same in-flight promise and only one of them ever runs the IIFE body.
+ */
+function loadSharp(): Promise<typeof import('sharp').default> {
+  if (!sharpModule) {
+    sharpModule = (async () => {
+      const sharp = (await import('sharp')).default
+      sharp.concurrency(1)
+      sharp.cache(false)
+      return sharp
+    })()
+  }
+  return sharpModule
+}
+
 export interface RenderRenditionInput {
   absPath: string
   size: RenditionSize
@@ -169,7 +229,7 @@ async function renderOnce(input: {
   // Only the decode/encode is gated — a cache hit above costs no sharp memory
   // and must never queue behind cold renders.
   return withRenditionSlot(async () => {
-    const sharp = (await import('sharp')).default
+    const sharp = await loadSharp()
     const config = SIZE_CONFIG[input.size]
     const pipeline = sharp(input.absPath).autoOrient().resize({
       width: config.dimension,

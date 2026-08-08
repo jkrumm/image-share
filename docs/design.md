@@ -240,6 +240,44 @@ can never be transiently exceeded. The limit is read per acquisition, not at mod
 can override it (same pattern as the sweep knobs). `renditionSlotStats()` exposes in-use/queued/
 acquired.
 
+**sharp global configuration (`loadSharp` in `render.ts`).** Configured exactly once, the
+first time sharp's native binding is actually loaded — lazily, inside the gated render path,
+never at module scope, guarded by a promise-memoized singleton so N concurrent first-callers
+still only run the configuration once. Two knobs:
+
+- `sharp.concurrency(1)`. libvips defaults its own worker-thread pool to the physical core
+  count (4 on the HomeLab container). `withRenditionSlot` already gates concurrent decodes
+  process-wide (RENDITION_CONCURRENCY, default 3), so libvips' own pool was redundant
+  multiplication on top of that gate, not extra throughput: worst case was 3 gated renders x 4
+  libvips threads = up to 12 worker threads, each potentially holding tile buffers for a
+  6240x4160 (26 MP) source, inside a 4-core / 1 GiB cgroup. Measured on the HomeLab: idle anon
+  sits at 897-911 MiB of the 1 GiB limit (~89%), `memory.events: max` had fired 11258 times
+  since boot, and `workingset_refault_anon`/`pgmajfault` (59396/24426) showed real anon reclaim
+  thrashing — not page cache pressure. A 40-concurrent cold-render burst pegged memory at
+  exactly 1024.0 MiB; it did **not** OOM-kill (`oom_kill 0`, `RestartCount 0`, all 88 requests
+  returned 200) because the RENDITION_CONCURRENCY gate already caps decodes at 3, and CPU during
+  a burst plateaus around 2.7-3.0 cores — the box is already CPU-bound at the width of our own
+  gate, so a wider libvips pool bought no extra throughput, only more concurrent decode buffers.
+  One libvips thread per gated render (1 x 3 = 3 worst-case threads, not 3 x 4 = 12) holds
+  throughput while cutting peak decode-buffer count roughly 4x. (A later idle-to-burst
+  measurement showed anon memory FALLING 863.9 -> 773.4 MiB under load — this was never a leak,
+  just a high-water mark the process held onto once touched, which is exactly the pattern a
+  smaller thread pool reduces.)
+- `sharp.cache(false)`. libvips' operation cache defaults to 50 MB / 20 files / 100 cached
+  operations, built for workloads that repeat the same operation graph against the same source.
+  Ours never does: every rendition is content-addressed and cached forever on our own disk
+  (above) the first time it's rendered, so a given source is decoded at most 4 times ever
+  (thumb/small/med/full) before every future request is served straight off disk without
+  touching sharp again. The in-memory operation cache buys real RSS for a structurally
+  near-zero hit rate here, so it's disabled outright rather than tuned down.
+
+Both are hardcoded constants, not env-tunable: they follow from facts that don't vary by
+deployment ("we already gate concurrency ourselves", "we already cache renditions on disk
+forever"), not from anything about the HomeLab box's specific core/memory shape that a future
+deployment would need to override. RENDITION_CONCURRENCY remains the one exposed knob for the
+actual pressure point (how many decodes run at once). The Dockerfile's jemalloc `LD_PRELOAD`
+(tames sharp's long-run RSS via better glibc-malloc-arena behavior) is unaffected and stays.
+
 ## 7. Shares — the public surface (`share/`)
 
 Auth model (no cookies, no passwords — role-based rework, stage 1): query `token` must match a
