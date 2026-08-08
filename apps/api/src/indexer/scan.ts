@@ -5,12 +5,12 @@
 import type { Dirent } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import { basename, dirname, extname, join } from 'node:path'
-import { and, eq, inArray, notInArray } from 'drizzle-orm'
+import { and, eq, inArray, isNull, ne, notInArray } from 'drizzle-orm'
 import { db as defaultDb, type Db } from '../db/index.js'
-import { b2Objects, images, type NewImageRow } from '../db/schema.js'
+import { b2Objects, imageKeywords, images, type NewImageRow } from '../db/schema.js'
 import { env } from '../env.js'
 import { safeJoin } from '../lib/paths.js'
-import { extractMetadata, type ImageKind } from './metadata.js'
+import { extractMetadata, keywordLeaf, type ImageKind } from './metadata.js'
 
 // Injectable db (mirrors lib/share-auth.ts's setShareDb / lib/s3.ts's setS3):
 // production defaults to the app-wide singleton; tests inject an isolated
@@ -112,6 +112,69 @@ async function runWithConcurrency<T>(
     }
   }
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => lane()))
+}
+
+/**
+ * Make an image's `image_keywords` rows match the freshly-extracted album
+ * paths — the file's XMP is truth, exactly like every other metadata column.
+ *
+ * Delete-then-insert rather than a diff: an image carries a handful of
+ * keywords at most, and the unconditional delete is what handles the "all tags
+ * removed in Lightroom" case, which a diff of the new set would miss. Called
+ * only where metadata was actually re-extracted, so the skip-when-unchanged
+ * fast path stays a pure no-op.
+ */
+async function replaceKeywords(imageId: number, paths: readonly string[]): Promise<void> {
+  await activeDb.delete(imageKeywords).where(eq(imageKeywords.imageId, imageId))
+  if (paths.length === 0) return
+  await activeDb
+    .insert(imageKeywords)
+    .values(paths.map((path) => ({ imageId, path, leaf: keywordLeaf(path) })))
+}
+
+/**
+ * True when a row's `image_keywords` mirror has never been reconciled and must
+ * be rebuilt once, even though the file's bytes are untouched.
+ *
+ * Without this, the album feature would ship dead on the existing index: the
+ * migration that creates `image_keywords` leaves it EMPTY, every already-indexed
+ * JPEG still matches on `file_size`/`mtime_ms`, so the skip-when-unchanged fast
+ * path below returns before `extractMetadata` and `replaceKeywords` is never
+ * reached. `/api/library/albums` would report one giant untagged node and every
+ * album share would resolve empty, with no way back short of deleting the
+ * sqlite file (which also destroys `shares`/`share_tokens`).
+ *
+ * A NULL marker column — not "has no keyword rows" — because the majority of
+ * the library is genuinely untagged: those rows are indistinguishable from
+ * never-scanned ones by row count alone, and re-extracting them on EVERY scan
+ * would cost 2000+ pointless metadata reads a night. `kind='raw'` is exempt: a
+ * RAF carries no album keywords by definition (metadata.ts), so its marker
+ * stays NULL forever and must not drag it into a re-read.
+ */
+function needsKeywordBackfill(existing: { keywordsIndexedAt: string | null }, kind: ImageKind) {
+  return kind !== 'raw' && existing.keywordsIndexedAt === null
+}
+
+/**
+ * Is there at least one indexed row still waiting for that backfill? The SQL
+ * twin of `needsKeywordBackfill`, kept in the same file so the two predicates
+ * cannot drift — a boot check that disagreed with the scanner would either scan
+ * forever or never.
+ *
+ * The boot scan (cron/reindex.ts) needs it because the marker alone is not a
+ * trigger: on a DEPLOY the migration adds `image_keywords` empty and leaves
+ * every one of the ~6000 existing rows at `keywords_indexed_at = NULL`, and a
+ * boot check that only asked "is the images table empty?" found 6000 rows and
+ * did nothing — so the album tree stayed empty until the 05:15 cron, up to a
+ * day later, on the one deploy where the whole feature is new.
+ */
+export async function keywordBackfillPending(database: Db = activeDb): Promise<boolean> {
+  const rows = await database
+    .select({ id: images.id })
+    .from(images)
+    .where(and(ne(images.kind, 'raw'), isNull(images.keywordsIndexedAt)))
+    .limit(1)
+  return rows.length > 0
 }
 
 interface DirNode {
@@ -224,7 +287,8 @@ async function scanRoot(root: Root, rootAbs: string, counts: ScanCounts): Promis
       existing !== undefined &&
       existing.fileSize === fileSize &&
       existing.mtimeMs === mtimeMs &&
-      !sidecarIsNewer
+      !sidecarIsNewer &&
+      !needsKeywordBackfill(existing, candidate.kind)
     if (unchanged) return
 
     const metadata = await extractMetadata({
@@ -233,6 +297,7 @@ async function scanRoot(root: Root, rootAbs: string, counts: ScanCounts): Promis
       sidecarPath: candidate.sidecarAbsPath,
       mtimeMs,
     })
+    const now = new Date().toISOString()
 
     const values: NewImageRow = {
       root,
@@ -249,15 +314,28 @@ async function scanRoot(root: Root, rootAbs: string, counts: ScanCounts): Promis
       width: metadata.width,
       height: metadata.height,
       rawPath: existing?.rawPath ?? null,
-      indexedAt: new Date().toISOString(),
+      indexedAt: now,
+      // Written together with the row whose keywords are replaced below, so a
+      // rescan can tell "scanned, genuinely untagged" from "never scanned".
+      keywordsIndexedAt: candidate.kind === 'raw' ? null : now,
     }
 
+    let imageId: number
     if (existing) {
       await activeDb.update(images).set(values).where(eq(images.id, existing.id))
+      imageId = existing.id
       counts.updated++
     } else {
-      await activeDb.insert(images).values(values)
+      const [inserted] = await activeDb.insert(images).values(values).returning({ id: images.id })
+      if (!inserted) throw new Error(`scanRoot: insert returned no row for ${candidate.relPath}`)
+      imageId = inserted.id
       counts.added++
+    }
+
+    // 'raw' never carries keywords (see metadata.ts) — skip the delete rather
+    // than issuing one pointless statement per changed RAF.
+    if (candidate.kind !== 'raw') {
+      await replaceKeywords(imageId, metadata.keywords)
     }
   })
 
@@ -390,6 +468,7 @@ export async function indexSinglePath(input: { root: 'share'; relPath: string })
   const dir = rawDir === '.' ? '' : rawDir
 
   const metadata = await extractMetadata({ absPath, kind, mtimeMs })
+  const now = new Date().toISOString()
 
   const values: NewImageRow = {
     root: 'share',
@@ -406,7 +485,8 @@ export async function indexSinglePath(input: { root: 'share'; relPath: string })
     width: metadata.width,
     height: metadata.height,
     rawPath: null,
-    indexedAt: new Date().toISOString(),
+    indexedAt: now,
+    keywordsIndexedAt: kind === 'raw' ? null : now,
   }
 
   const [row] = await activeDb
@@ -415,5 +495,8 @@ export async function indexSinglePath(input: { root: 'share'; relPath: string })
     .onConflictDoUpdate({ target: [images.root, images.relPath], set: values })
     .returning({ id: images.id })
   if (!row) throw new Error('indexSinglePath: insert returned no row')
+  if (kind !== 'raw') {
+    await replaceKeywords(row.id, metadata.keywords)
+  }
   return row.id
 }

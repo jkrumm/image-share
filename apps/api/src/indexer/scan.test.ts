@@ -7,7 +7,7 @@ import { and, eq } from 'drizzle-orm'
 import sharp from 'sharp'
 import { exiftool } from 'exiftool-vendored'
 import { createDb, runMigrations, type Db } from '../db/index.js'
-import { b2Objects, images } from '../db/schema.js'
+import { b2Objects, imageKeywords, images } from '../db/schema.js'
 import { endExiftool, parseFilenameDate } from './metadata.js'
 import * as metadataModule from './metadata.js'
 import { getIndexStatus, indexSinglePath, runScan, setScanDb, setScanRoots } from './scan.js'
@@ -52,7 +52,15 @@ afterAll(async () => {
 
 async function writeJpegFixture(
   absPath: string,
-  opts: { rating?: number; captureAt?: string; orientation?: number } = {},
+  opts: {
+    rating?: number
+    captureAt?: string
+    orientation?: number
+    /** XMP-lr:HierarchicalSubject — what Lightroom writes for an album tree. */
+    hierarchicalSubject?: string[]
+    /** XMP-dc:Subject only — a file tagged outside Lightroom. */
+    subject?: string[]
+  } = {},
 ): Promise<void> {
   await mkdir(dirname(absPath), { recursive: true })
   await sharp({
@@ -62,12 +70,23 @@ async function writeJpegFixture(
     .withMetadata({ orientation: opts.orientation ?? 1 })
     .toFile(absPath)
 
-  if (opts.rating !== undefined || opts.captureAt !== undefined) {
-    const tags: Record<string, unknown> = {}
-    if (opts.rating !== undefined) tags['Rating'] = opts.rating
-    if (opts.captureAt !== undefined) tags['DateTimeOriginal'] = opts.captureAt
+  const tags: Record<string, unknown> = {}
+  if (opts.rating !== undefined) tags['Rating'] = opts.rating
+  if (opts.captureAt !== undefined) tags['DateTimeOriginal'] = opts.captureAt
+  if (opts.hierarchicalSubject !== undefined) tags['HierarchicalSubject'] = opts.hierarchicalSubject
+  if (opts.subject !== undefined) tags['Subject'] = opts.subject
+  if (Object.keys(tags).length > 0) {
     await exiftool.write(absPath, tags, { writeArgs: ['-overwrite_original'] })
   }
+}
+
+/** An image's album rows, ordered for a stable assertion. */
+async function keywordsFor(imageId: number): Promise<Array<{ path: string; leaf: string }>> {
+  const rows = await testDb
+    .select({ path: imageKeywords.path, leaf: imageKeywords.leaf })
+    .from(imageKeywords)
+    .where(eq(imageKeywords.imageId, imageId))
+  return rows.toSorted((a, b) => a.path.localeCompare(b.path))
 }
 
 /** A RAF fixture is just bytes with a `.RAF` extension — exiftool tolerates
@@ -327,5 +346,184 @@ describe('indexSinglePath', () => {
 
   it('rejects a relPath that escapes SHARE_ROOT', async () => {
     await expect(indexSinglePath({ root: 'share', relPath: '../../etc/passwd' })).rejects.toThrow()
+  })
+})
+
+// The album hierarchy is the axis the flat Fuji tree is actually organized
+// along: Lightroom wrote it into the JPEGs, the indexer only mirrors it.
+describe('album keyword indexing', () => {
+  it('indexes hierarchicalSubject as full paths with their leaf', async () => {
+    const rel = 'albums/DSCF3116.JPG'
+    await writeJpegFixture(join(fujiRoot, rel), {
+      hierarchicalSubject: ['Ereignisse|Segeln 25', 'Insta Post Segel 25'],
+    })
+
+    await runScan()
+
+    const row = await rowFor('fuji', rel)
+    expect(await keywordsFor(row!.id)).toEqual([
+      { path: 'Ereignisse|Segeln 25', leaf: 'Segeln 25' },
+      { path: 'Insta Post Segel 25', leaf: 'Insta Post Segel 25' },
+    ])
+  })
+
+  it('falls back to flat subject keywords as single-segment paths', async () => {
+    const rel = 'albums/DSCF3117.JPG'
+    await writeJpegFixture(join(fujiRoot, rel), { subject: ['Marokko'] })
+
+    await runScan()
+
+    const row = await rowFor('fuji', rel)
+    expect(await keywordsFor(row!.id)).toEqual([{ path: 'Marokko', leaf: 'Marokko' }])
+  })
+
+  it('writes no rows for an untagged image — the majority of the library', async () => {
+    const rel = 'albums/DSCF3118.JPG'
+    await writeJpegFixture(join(fujiRoot, rel), { rating: 2 })
+
+    await runScan()
+
+    const row = await rowFor('fuji', rel)
+    expect(row?.rating).toBe(2)
+    expect(await keywordsFor(row!.id)).toEqual([])
+  })
+
+  it('writes no rows for a RAF', async () => {
+    await writeRafFixture(join(rawsRoot, 'DSCF7000.RAF'))
+
+    await runScan()
+
+    const row = await rowFor('raws', 'DSCF7000.RAF')
+    expect(await keywordsFor(row!.id)).toEqual([])
+  })
+
+  it('replaces keywords on re-index when the album tags change', async () => {
+    const rel = 'albums/DSCF3119.JPG'
+    const abs = join(fujiRoot, rel)
+    await writeJpegFixture(abs, { hierarchicalSubject: ['Ereignisse|Segeln 25'] })
+    await runScan()
+
+    const row = await rowFor('fuji', rel)
+    expect(await keywordsFor(row!.id)).toEqual([
+      { path: 'Ereignisse|Segeln 25', leaf: 'Segeln 25' },
+    ])
+
+    // Re-tagged in Lightroom: one album swapped, one removed entirely. Force a
+    // strictly newer mtime so the skip-when-unchanged check can't win on a
+    // coarse filesystem timestamp.
+    await rm(abs)
+    await writeJpegFixture(abs, { hierarchicalSubject: ['Ereignisse|Wandern 26'] })
+    const future = new Date(Date.now() + 5000)
+    await utimes(abs, future, future)
+
+    await runScan()
+
+    expect(await rowFor('fuji', rel)).toMatchObject({ id: row!.id })
+    expect(await keywordsFor(row!.id)).toEqual([
+      { path: 'Ereignisse|Wandern 26', leaf: 'Wandern 26' },
+    ])
+  })
+
+  it('drops all keywords when the tags are cleared', async () => {
+    const rel = 'albums/DSCF3120.JPG'
+    const abs = join(fujiRoot, rel)
+    await writeJpegFixture(abs, { hierarchicalSubject: ['Ereignisse|Segeln 25'] })
+    await runScan()
+    const row = await rowFor('fuji', rel)
+    expect(await keywordsFor(row!.id)).toHaveLength(1)
+
+    await rm(abs)
+    await writeJpegFixture(abs, { rating: 1 })
+    const future = new Date(Date.now() + 5000)
+    await utimes(abs, future, future)
+
+    await runScan()
+
+    expect(await keywordsFor(row!.id)).toEqual([])
+  })
+
+  it('cascades keyword rows away when the image is pruned', async () => {
+    const rel = 'albums/DSCF3121.JPG'
+    const abs = join(fujiRoot, rel)
+    await writeJpegFixture(abs, { hierarchicalSubject: ['Ereignisse|Segeln 25'] })
+    await runScan()
+    const row = await rowFor('fuji', rel)
+    expect(await keywordsFor(row!.id)).toHaveLength(1)
+
+    // The file is moved out of the tree → its row is pruned by the next scan.
+    await rm(abs)
+    await runScan()
+
+    expect(await rowFor('fuji', rel)).toBeNull()
+    expect(await keywordsFor(row!.id)).toEqual([])
+  })
+
+  it('backfills an already-indexed row whose keyword mirror was never built', async () => {
+    // The state migration 0003 leaves behind on the live index: `images` rows
+    // that match disk byte-for-byte, and an EMPTY image_keywords table. Without
+    // the keywords_indexed_at marker the skip-when-unchanged fast path returns
+    // before extractMetadata, so /api/library/albums would show one giant
+    // untagged node and every album share would resolve empty — forever, since
+    // there is no force-rescan short of deleting the sqlite file.
+    const rel = 'albums/DSCF3122.JPG'
+    await writeJpegFixture(join(fujiRoot, rel), {
+      hierarchicalSubject: ['Ereignisse|Segeln 25'],
+    })
+    await runScan()
+    const row = await rowFor('fuji', rel)
+    expect(await keywordsFor(row!.id)).toHaveLength(1)
+
+    await testDb.delete(imageKeywords).where(eq(imageKeywords.imageId, row!.id))
+    await testDb.update(images).set({ keywordsIndexedAt: null }).where(eq(images.id, row!.id))
+
+    const counts = await runScan()
+
+    expect(counts.updated).toBeGreaterThanOrEqual(1)
+    expect(counts.added).toBe(0)
+    expect(await keywordsFor(row!.id)).toEqual([
+      { path: 'Ereignisse|Segeln 25', leaf: 'Segeln 25' },
+    ])
+  })
+
+  it('the backfill is one-shot: untagged JPEGs and RAFs are not re-read every scan', async () => {
+    // The majority of the library carries no keywords at all, so "has no
+    // image_keywords rows" cannot be the backfill trigger — it would re-read
+    // 1800+ files a night. The marker distinguishes scanned-and-untagged from
+    // never-scanned; a RAF never gets one and must not be dragged in either.
+    // `indexed_at` only moves when a row is rewritten, i.e. when the fast path
+    // did NOT skip it. (Counting rows globally would fold in the RAF whose
+    // sidecar this file deliberately stamped into the future.)
+    const indexedAtByRow = async () =>
+      (
+        await testDb
+          .select({ id: images.id, indexedAt: images.indexedAt })
+          .from(images)
+          .where(eq(images.kind, 'jpeg'))
+      ).toSorted((a, b) => a.id - b.id)
+
+    const before = await indexedAtByRow()
+    const rafBefore = await rowFor('raws', 'DSCF7000.RAF')
+
+    await runScan()
+
+    expect(await indexedAtByRow()).toEqual(before)
+    expect((await rowFor('raws', 'DSCF7000.RAF'))?.indexedAt).toBe(rafBefore!.indexedAt)
+    // …and the untagged JPEGs really are untagged, not merely unscanned.
+    const untagged = await rowFor('fuji', 'albums/DSCF3118.JPG')
+    expect(untagged?.keywordsIndexedAt).not.toBeNull()
+    expect(await keywordsFor(untagged!.id)).toEqual([])
+  })
+
+  it('indexes keywords on a share ingest too', async () => {
+    const relPath = '2026/07/tagged-ingest.jpg'
+    await writeJpegFixture(join(shareDir, relPath), {
+      hierarchicalSubject: ['Insta Post Marokko'],
+    })
+
+    const id = await indexSinglePath({ root: 'share', relPath })
+
+    expect(await keywordsFor(id)).toEqual([
+      { path: 'Insta Post Marokko', leaf: 'Insta Post Marokko' },
+    ])
   })
 })

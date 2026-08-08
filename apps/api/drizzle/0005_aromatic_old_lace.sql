@@ -1,0 +1,1 @@
+ALTER TABLE `images` ADD `keywords_indexed_at` text;

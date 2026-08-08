@@ -18,6 +18,61 @@ export interface ImageMetadata {
   rating: number | null
   width: number | null
   height: number | null
+  /** Full hierarchical keyword paths, '|'-separated (e.g. 'Ereignisse|Segeln
+   * 25'). Empty for RAF — the album hierarchy lives in the JPEGs only. */
+  keywords: string[]
+}
+
+// The album hierarchy Lightroom / Adobe Camera Raw already wrote into the
+// JPEGs, in preference order. `hierarchicalSubject` (XMP-lr:HierarchicalSubject,
+// note exifr's lowercase first letter) is the only one that carries the tree;
+// `subject` (XMP-dc) and `Keywords` (IPTC) are Lightroom's flat mirrors of the
+// LEAF names and are the fallback for a file tagged outside Lightroom — those
+// land as single-segment paths, which is a valid album path.
+const KEYWORD_TAGS = ['hierarchicalSubject', 'subject', 'Keywords'] as const
+
+/** exifr returns a bare string when a set-valued XMP/IPTC tag holds exactly
+ * one value, and an array otherwise. */
+function toStringArray(value: unknown): string[] {
+  if (typeof value === 'string') return [value]
+  if (Array.isArray(value)) return value.filter((v): v is string => typeof v === 'string')
+  return []
+}
+
+/**
+ * Pick the album keyword paths out of a parsed tag set, normalized: segments
+ * trimmed, empty segments and empty paths dropped, duplicates removed, source
+ * order preserved.
+ *
+ * Only the FIRST populated tag of `KEYWORD_TAGS` is used — they are mirrors of
+ * each other, so merging them would flatten 'Ereignisse|Segeln 25' back into a
+ * duplicate root-level 'Segeln 25' album. Lightroom also writes dc:subject
+ * twice on some files (once via Subject, once via Keywords), hence the dedupe.
+ */
+export function extractKeywordPaths(tags: Record<string, unknown> | null | undefined): string[] {
+  if (!tags) return []
+  for (const tag of KEYWORD_TAGS) {
+    const raw = toStringArray(tags[tag])
+    if (raw.length === 0) continue
+    const paths: string[] = []
+    for (const value of raw) {
+      const path = value
+        .split('|')
+        .map((segment) => segment.trim())
+        .filter((segment) => segment.length > 0)
+        .join('|')
+      if (path.length > 0 && !paths.includes(path)) paths.push(path)
+    }
+    if (paths.length > 0) return paths
+  }
+  return []
+}
+
+/** Last segment of a hierarchical keyword path — the album's own name.
+ * `lastIndexOf` returns -1 for a flat keyword, so the whole string is the
+ * leaf. */
+export function keywordLeaf(path: string): string {
+  return path.slice(path.lastIndexOf('|') + 1)
 }
 
 // Filenames like `2026-07-21_14-30-05_foo.jpg` — a capture-date fallback used
@@ -84,6 +139,9 @@ async function extractViaExifr(input: {
       tiff: true,
       exif: true,
       xmp: true,
+      // IPTC:Keywords is the last-resort album source (see KEYWORD_TAGS) for a
+      // file tagged outside Lightroom, which writes no XMP.
+      iptc: true,
       translateValues: false,
     })
     .catch(() => null)
@@ -111,7 +169,7 @@ async function extractViaExifr(input: {
         ? tags.ImageHeight
         : null
 
-  return { captureAt, orientation, rating, width, height }
+  return { captureAt, orientation, rating, width, height, keywords: extractKeywordPaths(tags) }
 }
 
 // Module-level reference to the dynamically-imported exiftool-vendored module
@@ -150,7 +208,10 @@ async function extractViaExiftool(input: {
   const width = typeof tags?.ImageWidth === 'number' ? tags.ImageWidth : null
   const height = typeof tags?.ImageHeight === 'number' ? tags.ImageHeight : null
 
-  return { captureAt, orientation, rating, width, height }
+  // No keywords for RAF: the album hierarchy is written by Lightroom onto the
+  // exported JPEG, and a RAF is only ever downloaded/zipped, never browsed by
+  // album. Reading them here would also mean a second exiftool round-trip.
+  return { captureAt, orientation, rating, width, height, keywords: [] }
 }
 
 /**

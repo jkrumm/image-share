@@ -1,5 +1,5 @@
 import { env } from '../env.js'
-import { registerReindexCron, reindexOnBootIfEmpty } from './reindex.js'
+import { registerReindexCron, reindexOnBoot } from './reindex.js'
 import { registerB2ReconcileCron } from './b2-reconcile.js'
 import { registerReverseBackupCron } from './reverse-backup.js'
 import { registerRenditionSweepCron } from './rendition-sweep.js'
@@ -18,7 +18,8 @@ export function registerCronJobs(): void {
   registerB2ReconcileCron()
   registerReverseBackupCron()
   registerRenditionSweepCron()
-  // Background boot scan when the index is empty (design §9).
-  reindexOnBootIfEmpty()
+  // Background boot scan when the index is empty OR a keyword backfill is still
+  // pending — the state a deploy of the album feature leaves behind (design §9).
+  reindexOnBoot()
   console.info('[cron] scheduled jobs registered')
 }
