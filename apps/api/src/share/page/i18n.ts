@@ -25,6 +25,12 @@ export interface Messages {
   langEs: string
   downloadAll: string
   downloadAllBusy: string
+  /**
+   * Replaces the size line while the archive is being prepared. The server
+   * builds the whole ZIP before it sends anything, so a large share shows no
+   * download at all for minutes — without this the page looks broken.
+   */
+  downloadAllWait: string
   emptyState: string
   showMore: string
   lightboxClose: string
@@ -69,6 +75,7 @@ const MESSAGES: Record<Locale, Messages> = {
     langEs: 'Español',
     downloadAll: 'Download all (.zip)',
     downloadAllBusy: 'Preparing download…',
+    downloadAllWait: 'Packing the archive — large shares take a few minutes. It starts on its own.',
     emptyState: 'No photos in this share yet.',
     showMore: 'Show more photos',
     lightboxClose: 'Close',
@@ -109,6 +116,8 @@ const MESSAGES: Record<Locale, Messages> = {
     langEs: 'Español',
     downloadAll: 'Alle herunterladen (.zip)',
     downloadAllBusy: 'Download wird vorbereitet…',
+    downloadAllWait:
+      'Archiv wird gepackt — bei großen Shares dauert das ein paar Minuten. Es startet von selbst.',
     emptyState: 'Noch keine Fotos in diesem Share.',
     showMore: 'Weitere Fotos anzeigen',
     lightboxClose: 'Schließen',
@@ -149,6 +158,7 @@ const MESSAGES: Record<Locale, Messages> = {
     langEs: 'Español',
     downloadAll: 'Descargar todo (.zip)',
     downloadAllBusy: 'Preparando la descarga…',
+    downloadAllWait: 'Preparando el archivo: en shares grandes tarda unos minutos. Empieza solo.',
     emptyState: 'Todavía no hay fotos en este share.',
     showMore: 'Mostrar más fotos',
     lightboxClose: 'Cerrar',

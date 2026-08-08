@@ -1,16 +1,46 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ImageRow, ShareRow } from '../db/schema.js'
+import { env } from '../env.js'
 import { rootBaseDir } from '../lib/paths.js'
 import { attachment } from './attachment.js'
-import { buildShareZip, estimateShareZipBytes } from './zip.js'
+import {
+  buildShareZip,
+  estimateShareZipBytes,
+  keepRequestAlive,
+  zipSpoolKey,
+  zipSpoolPath,
+} from './zip.js'
 
 // Unique temp subtree under the real (dev-default) roots so buildShareZip's
 // env-based path resolution finds the fixtures. Never touches real photo trees.
 const SUB = `ziptest-${process.pid}-${Date.now()}`
 const fujiBase = rootBaseDir('fuji')
 const rawsBase = rootBaseDir('raws')
+
+// The archive is spooled under DATA_DIR (zip.ts), so this file gets its own
+// throwaway DATA_DIR — same isolation the rendition cache tests use — and every
+// spool assertion below can count files without seeing the dev cache.
+const originalDataDir = env.DATA_DIR
+let dataDir: string
+
+function spoolFiles(): string[] {
+  try {
+    return readdirSync(join(env.DATA_DIR, 'zip-spool')).toSorted()
+  } catch {
+    return []
+  }
+}
 
 function shareOf(over: Partial<ShareRow> = {}): ShareRow {
   return {
@@ -54,6 +84,8 @@ function imageOf(over: Partial<ImageRow> = {}): ImageRow {
 }
 
 beforeAll(() => {
+  dataDir = mkdtempSync(join(tmpdir(), 'ziptest-data-'))
+  env.DATA_DIR = dataDir
   mkdirSync(join(fujiBase, SUB), { recursive: true })
   mkdirSync(join(rawsBase, SUB), { recursive: true })
   // Non-trivial JPEG-ish payloads (content is irrelevant to the zip container).
@@ -65,10 +97,21 @@ beforeAll(() => {
 afterAll(() => {
   rmSync(join(fujiBase, SUB), { recursive: true, force: true })
   rmSync(join(rawsBase, SUB), { recursive: true, force: true })
+  env.DATA_DIR = originalDataDir
+  rmSync(dataDir, { recursive: true, force: true })
 })
 
 async function bytesOf(res: Response): Promise<Uint8Array> {
   return new Uint8Array(await res.arrayBuffer())
+}
+
+/** Poll until `pred` holds, so a test never has to guess a build's duration. */
+async function waitFor(pred: () => boolean, label: string, timeoutMs = 30_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!pred()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`)
+    await Bun.sleep(2)
+  }
 }
 
 /** Latin1 view so ASCII filenames stored in zip headers are searchable. */
@@ -154,6 +197,358 @@ describe('buildShareZip (download/full roles)', () => {
     const buf = await bytesOf(res)
     expect(buf.length).toBe(Number(res.headers.get('content-length')))
   })
+})
+
+// The bounded-memory contract (design §7): the archive is materialized on disk
+// and served as a `Bun.file`, so no part of the response is ever produced by
+// JavaScript and Bun's unbounded ReadableStream sink (oven-sh/bun#32469) is
+// never involved. These tests pin that property rather than the RSS number,
+// which is what actually survives a refactor.
+describe('buildShareZip spooling', () => {
+  const share = shareOf()
+  const images = [
+    imageOf({ id: 10 }),
+    imageOf({ id: 11, relPath: `${SUB}/DSCF0002.JPG`, stem: 'DSCF0002' }),
+  ]
+
+  it('materializes the whole archive on disk before the response exists', async () => {
+    const res = await buildShareZip({ share, images, role: 'download' })
+    const entries = [
+      {
+        name: 'DSCF0001.JPG',
+        size: 2048,
+        lastModified: statSync(join(fujiBase, SUB, 'DSCF0001.JPG')).mtime,
+      },
+      {
+        name: 'DSCF0002.JPG',
+        size: 3072,
+        lastModified: statSync(join(fujiBase, SUB, 'DSCF0002.JPG')).mtime,
+      },
+    ]
+    const path = zipSpoolPath(zipSpoolKey({ share, role: 'download', entries }))
+    // Complete on disk already — nothing is left for a stream to produce.
+    expect(statSync(path).size).toBe(Number(res.headers.get('content-length')))
+    expect(statSync(path).size).toBe((await bytesOf(res)).length)
+  })
+
+  it('serves the archive from the spool even after every source file is gone', async () => {
+    // The strongest available proof that the response is file-backed rather
+    // than streamed out of the originals: delete the sources, then serve. If a
+    // single byte still came from a `Bun.file` of a source path, this fails.
+    const gone = `${SUB}-vanishing`
+    mkdirSync(join(fujiBase, gone), { recursive: true })
+    writeFileSync(join(fujiBase, gone, 'A.JPG'), Buffer.alloc(4096, 0x44))
+    const vanishing = shareOf({ slug: 'vanishing', dir: gone })
+    const rows = [imageOf({ id: 90, relPath: `${gone}/A.JPG`, dir: gone, stem: 'A' })]
+
+    const res = await buildShareZip({ share: vanishing, images: rows, role: 'download' })
+    const expectedLength = Number(res.headers.get('content-length'))
+    // The body has not been touched yet. Pull the originals out from under it.
+    rmSync(join(fujiBase, gone), { recursive: true, force: true })
+
+    const buf = await bytesOf(res)
+    expect(buf.length).toBe(expectedLength)
+    expect(buf.length).toBeGreaterThan(4096)
+    expect(asLatin1(buf)).toContain('A.JPG')
+  })
+
+  it('reuses the spool on a repeat request instead of building a second archive', async () => {
+    const uniq = shareOf({ slug: 'reuse' })
+    const before = spoolFiles().length
+    const first = await bytesOf(await buildShareZip({ share: uniq, images, role: 'download' }))
+    const afterFirst = spoolFiles()
+    const second = await bytesOf(await buildShareZip({ share: uniq, images, role: 'download' }))
+    expect(spoolFiles()).toEqual(afterFirst)
+    expect(afterFirst.length).toBe(before + 1)
+    expect(second).toEqual(first)
+  })
+
+  it('joins concurrent requests for the same archive into a single spool', async () => {
+    const uniq = shareOf({ slug: 'concurrent' })
+    const before = spoolFiles().length
+    const [a, b, c] = await Promise.all([
+      buildShareZip({ share: uniq, images, role: 'download' }).then(bytesOf),
+      buildShareZip({ share: uniq, images, role: 'download' }).then(bytesOf),
+      buildShareZip({ share: uniq, images, role: 'download' }).then(bytesOf),
+    ])
+    expect(spoolFiles().length).toBe(before + 1)
+    expect(b).toEqual(a!)
+    expect(c).toEqual(a!)
+  })
+
+  it('rebuilds rather than serving a stale archive when a source file changes', async () => {
+    const churn = `${SUB}-churn`
+    mkdirSync(join(fujiBase, churn), { recursive: true })
+    writeFileSync(join(fujiBase, churn, 'B.JPG'), Buffer.alloc(1024, 0x55))
+    const s = shareOf({ slug: 'churn', dir: churn })
+    const rows = [imageOf({ id: 91, relPath: `${churn}/B.JPG`, dir: churn, stem: 'B' })]
+
+    const first = await bytesOf(await buildShareZip({ share: s, images: rows, role: 'download' }))
+    // Different size AND a later mtime — both are in the spool key.
+    writeFileSync(join(fujiBase, churn, 'B.JPG'), Buffer.alloc(9999, 0x66))
+    const second = await bytesOf(await buildShareZip({ share: s, images: rows, role: 'download' }))
+
+    expect(second.length).not.toBe(first.length)
+    rmSync(join(fujiBase, churn), { recursive: true, force: true })
+  })
+
+  it('aborts the spool on client disconnect, leaving no partial archive behind', async () => {
+    const uniq = shareOf({ slug: 'aborted' })
+    const before = spoolFiles()
+    const ac = new AbortController()
+    const pending = buildShareZip({ share: uniq, images, role: 'download', signal: ac.signal })
+    // Same tick: `buildShareZip` has not passed its first `await` (the stat
+    // pass), so the pre-spool guard is guaranteed to see the aborted signal and
+    // no build is ever started.
+    ac.abort()
+    await expect(pending).rejects.toThrow(/aborted/)
+    // No published archive, and no orphaned `.part` file either.
+    expect(spoolFiles()).toEqual(before)
+  })
+
+  it('rejects immediately when handed an already-aborted signal', async () => {
+    const uniq = shareOf({ slug: 'pre-aborted' })
+    const before = spoolFiles()
+    await expect(
+      buildShareZip({ share: uniq, images, role: 'download', signal: AbortSignal.abort() }),
+    ).rejects.toThrow(/aborted/)
+    expect(spoolFiles()).toEqual(before)
+  })
+
+  it('one visitor hanging up does not cancel an archive another is still waiting for', async () => {
+    const uniq = shareOf({ slug: 'refcounted' })
+    const ac = new AbortController()
+    const quitter = buildShareZip({ share: uniq, images, role: 'download', signal: ac.signal })
+    const stayer = buildShareZip({ share: uniq, images, role: 'download' })
+    ac.abort()
+    await expect(quitter).rejects.toThrow(/aborted/)
+    // The surviving waiter still gets a complete, valid archive.
+    const buf = await bytesOf(await stayer)
+    expect([buf[0], buf[1], buf[2], buf[3]]).toEqual([0x50, 0x4b, 0x03, 0x04])
+    expect(asLatin1(buf)).toContain('DSCF0002.JPG')
+  })
+
+  it('answers a byte-range request from the spool so a big download can resume', async () => {
+    const uniq = shareOf({ slug: 'resumable' })
+    const server = Bun.serve({
+      port: 0,
+      fetch: async () => await buildShareZip({ share: uniq, images, role: 'download' }),
+    })
+    try {
+      const whole = new Uint8Array(await (await fetch(server.url)).arrayBuffer())
+      const res = await fetch(server.url, { headers: { range: `bytes=8-23` } })
+      expect(res.status).toBe(206)
+      expect(res.headers.get('content-range')).toBe(`bytes 8-23/${whole.length}`)
+      expect(new Uint8Array(await res.arrayBuffer())).toEqual(whole.slice(8, 24))
+    } finally {
+      server.stop(true)
+    }
+  })
+
+  it('delivers the complete archive to a consumer that stalls mid-download', async () => {
+    const uniq = shareOf({ slug: 'slow-consumer' })
+    const server = Bun.serve({
+      port: 0,
+      fetch: async () => await buildShareZip({ share: uniq, images, role: 'download' }),
+    })
+    try {
+      const expected = new Uint8Array(await (await fetch(server.url)).arrayBuffer())
+      const res = await fetch(server.url)
+      const reader = res.body!.getReader()
+      const chunks: Uint8Array[] = []
+      let stalled = false
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (!stalled) {
+          stalled = true
+          await Bun.sleep(250)
+        }
+        chunks.push(value)
+      }
+      const got = new Uint8Array(chunks.reduce((n, c) => n + c.byteLength, 0))
+      let at = 0
+      for (const c of chunks) {
+        got.set(c, at)
+        at += c.byteLength
+      }
+      expect(got).toEqual(expected)
+    } finally {
+      server.stop(true)
+    }
+  })
+})
+
+// Everything below needs a build long enough to observe while it is running —
+// the 5 KB fixtures above are done before anything can happen concurrently, and
+// "what happens DURING a multi-GB spool" is the whole subject here.
+describe('buildShareZip during a long build', () => {
+  const BIG = `${SUB}-big`
+  const CHUNK = 24 * 1024 * 1024
+  const FILES = 4
+  const bigImages = Array.from({ length: FILES }, (_, i) =>
+    imageOf({ id: 200 + i, relPath: `${BIG}/F${i}.JPG`, dir: BIG, stem: `F${i}` }),
+  )
+
+  function bigEntries(): { name: string; size: number; lastModified: Date }[] {
+    return Array.from({ length: FILES }, (_, i) => ({
+      name: `F${i}.JPG`,
+      size: CHUNK,
+      lastModified: statSync(join(fujiBase, BIG, `F${i}.JPG`)).mtime,
+    }))
+  }
+
+  beforeAll(() => {
+    mkdirSync(join(fujiBase, BIG), { recursive: true })
+    for (let i = 0; i < FILES; i++) {
+      writeFileSync(join(fujiBase, BIG, `F${i}.JPG`), Buffer.alloc(CHUNK, i + 1))
+    }
+  })
+
+  afterAll(() => {
+    rmSync(join(fujiBase, BIG), { recursive: true, force: true })
+  })
+
+  it('hands the event loop back while the archive is building', async () => {
+    // The spool loop has no real suspension point (page-cached reads and sink
+    // flushes both settle as microtasks, CRC32 is pure CPU), so without an
+    // explicit yield it drains the microtask queue for its entire duration:
+    // measured over 400 MiB, a 50 ms interval ticked ZERO times. That starves
+    // the container HEALTHCHECK into a restart mid-build, queues every other
+    // visitor behind the archive, and makes the disconnect handling below
+    // undeliverable. This is the test that pins the fix.
+    const share = shareOf({ slug: 'yielding', dir: BIG })
+    let ticks = 0
+    const interval = setInterval(() => {
+      ticks++
+    }, 5)
+    const started = performance.now()
+    await buildShareZip({ share, images: bigImages, role: 'download' })
+    const elapsed = performance.now() - started
+    clearInterval(interval)
+
+    // Premise check: a build this short would prove nothing either way.
+    expect(elapsed).toBeGreaterThan(50)
+    expect(ticks).toBeGreaterThan(2)
+  })
+
+  it('finishes a build its last visitor walked away from, so the retry is a cache hit', async () => {
+    // Cloudflare's ~100 s origin timeout can drop the 19 GB archive's connection
+    // (design §7). Aborting the build on the last waiter's exit unlinked the
+    // `.part`, so the retry restarted from zero and 524'd again — forever. The
+    // build now outlives the visitor and publishes.
+    const share = shareOf({ slug: 'abandoned', dir: BIG })
+    const spoolPath = zipSpoolPath(zipSpoolKey({ share, role: 'download', entries: bigEntries() }))
+    const ac = new AbortController()
+    const pending = buildShareZip({ share, images: bigImages, role: 'download', signal: ac.signal })
+
+    // Abort strictly mid-build, not before it: the `.part` only exists while the
+    // spool loop is running. That the abort is delivered at all is itself the
+    // event-loop yield doing its job.
+    await waitFor(() => spoolFiles().some((f) => f.endsWith('.part')), 'the spool to start')
+    ac.abort()
+    await expect(pending).rejects.toThrow(/aborted/)
+
+    await waitFor(() => existsSync(spoolPath), 'the abandoned build to publish')
+    expect(spoolFiles().some((f) => f.endsWith('.part'))).toBe(false)
+
+    const retryStarted = performance.now()
+    const res = await buildShareZip({ share, images: bigImages, role: 'download' })
+    const retryMs = performance.now() - retryStarted
+    expect(Number(res.headers.get('content-length'))).toBe(statSync(spoolPath).size)
+    // A rebuild of this fixture takes hundreds of ms; a cache hit is a stat.
+    expect(retryMs).toBeLessThan(50)
+  })
+
+  it('joins a build already in flight instead of starting a second one', async () => {
+    // The repeat-tap case: the visitor taps again while the archive is still
+    // being built. Both requests must land on the same build.
+    const share = shareOf({ slug: 'rejoined', dir: BIG })
+    const before = spoolFiles().length
+    const first = buildShareZip({ share, images: bigImages, role: 'download' })
+    await waitFor(() => spoolFiles().some((f) => f.endsWith('.part')), 'the spool to start')
+    const second = buildShareZip({ share, images: bigImages, role: 'download' })
+
+    const [a, b] = await Promise.all([first.then(bytesOf), second.then(bytesOf)])
+    expect(spoolFiles().length).toBe(before + 1)
+    expect(b).toEqual(a!)
+  })
+})
+
+/**
+ * A server whose handler produces nothing for 12 s, scaled down ~50x from
+ * production (255 s re-armed every 30 s): a 2 s idle timeout and a 5 s re-arm
+ * every 500 ms. The silence is more than double the re-arm, so surviving
+ * REQUIRES the heartbeat to keep resetting the timer rather than having set it
+ * once — and 5 s rather than something smaller because uWS's timer has a ~4 s
+ * granularity, where a re-arm of 4 s or less can still be swept at the next tick.
+ */
+function serveSilently(keepAlive: boolean) {
+  return Bun.serve({
+    port: 0,
+    idleTimeout: 2,
+    fetch: async (request, self) => {
+      const release = keepAlive
+        ? keepRequestAlive({ server: self, request, intervalMs: 500, seconds: 5 })
+        : () => {}
+      try {
+        await Bun.sleep(12_000)
+      } finally {
+        release()
+      }
+      return new Response('spooled')
+    },
+  })
+}
+
+describe('keepRequestAlive', () => {
+  it('re-arms repeatedly at the server ceiling, and stops the moment it is released', async () => {
+    const calls: number[] = []
+    const release = keepRequestAlive({
+      server: {
+        timeout: (_request, seconds) => {
+          calls.push(seconds)
+        },
+      },
+      request: new Request('http://localhost/s/x/zip'),
+      intervalMs: 5,
+    })
+    await Bun.sleep(60)
+    release()
+
+    // Many re-arms, all at Bun's maximum (`Bun.serve` throws above 255).
+    expect(calls.length).toBeGreaterThan(2)
+    expect(calls.every((seconds) => seconds === 255)).toBe(true)
+
+    // A released heartbeat must not outlive its request — it holds a reference
+    // to it, and the socket has to be allowed to die once we are done with it.
+    const afterRelease = calls.length
+    await Bun.sleep(30)
+    expect(calls.length).toBe(afterRelease)
+  })
+
+  it('holds a request that produces no bytes open past the server idleTimeout', async () => {
+    // A spooling request is silent until the archive is complete, so uWS's idle
+    // timer — capped at 255 s, `Bun.serve` throws above it — would kill a
+    // multi-GB build at the ORIGIN, which no tunnel setting can fix.
+    // Two origins rather than two paths: Bun's fetch pools connections per
+    // origin, and the control's dead socket would take the other request with it.
+    const control = serveSilently(false)
+    const server = serveSilently(true)
+    try {
+      // Both at once, so the control's ~4 s death is not added to the clock.
+      const [silent, kept] = await Promise.allSettled([fetch(control.url), fetch(server.url)])
+      // Control: without the heartbeat the origin drops the silent request.
+      expect(silent.status).toBe('rejected')
+      expect(kept.status).toBe('fulfilled')
+      if (kept.status !== 'fulfilled') return
+      expect(kept.value.status).toBe(200)
+      expect(await kept.value.text()).toBe('spooled')
+    } finally {
+      control.stop(true)
+      server.stop(true)
+    }
+  }, 30_000)
 })
 
 describe('estimateShareZipBytes', () => {

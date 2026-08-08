@@ -175,6 +175,8 @@ function mountShare(opts: {
   tiles: number
   total: number
   hasMore?: boolean
+  /** Predicted archive size — drives the download-all button's busy window. */
+  zipBytes?: number
   /** Seeds `localStorage['image-share.shares']` for the switcher tests. */
   remembered?: Array<{ slug: string; token: string; title: string; count: number }>
 }) {
@@ -220,6 +222,8 @@ function mountShare(opts: {
   const switcherMenu = new FakeEl()
   switcherMenu.hidden = true
   const rawSize = new FakeEl()
+  const zipBtn = new FakeEl()
+  zipBtn.q = { '.zip-label': new FakeEl(), '.zip-meta': new FakeEl() }
   const byId: Record<string, FakeEl | null> = {
     gallery,
     more: opts.hasMore === false ? null : moreBox,
@@ -238,7 +242,7 @@ function mountShare(opts: {
     lbraw: new FakeEl(),
     lbrawsize: rawSize,
     meta: new FakeEl(),
-    zipBtn: null,
+    zipBtn,
     switcherBtn,
     switcherMenu,
   }
@@ -311,7 +315,7 @@ function mountShare(opts: {
     'history',
     'setTimeout',
     'clearTimeout',
-    mainScript(cfgFor({ total: opts.total }), CATALOGUE),
+    mainScript(cfgFor({ total: opts.total, zipBytes: opts.zipBytes ?? 10 }), CATALOGUE),
   )
   run(
     win,
@@ -343,7 +347,12 @@ function mountShare(opts: {
     switcherBtn,
     switcherMenu,
     rawSize,
+    zipBtn,
     images: createdImages,
+    /** Tap "Download all (.zip)", as a visitor does. */
+    tapZip(): void {
+      zipBtn.fire('click', { preventDefault: () => {} })
+    },
     /** Simulate the NEXT `new Image()` staying in flight (not yet decoded). */
     queueImageComplete(value: boolean): void {
       imageCompleteQueue.push(value)
@@ -503,6 +512,54 @@ describe('mainScript — progressive reveal + lightbox', () => {
     const dom = mountShare({ tiles: 5, total: 5, hasMore: false })
     dom.openTile(1) // fixture tiles default to raw: '0'
     expect(dom.rawSize.textContent).toBe('')
+  })
+})
+
+// The server builds the whole archive on disk before it sends a byte (design
+// §7), so time-to-first-byte IS the build time. The old fixed 20 s guard was
+// sized for the streamed response and un-busied the button minutes before a
+// multi-GB archive was ready — the visitor saw an idle button, no download, and
+// no reason to believe anything was happening.
+describe('mainScript — download-all feedback', () => {
+  const EN = allMessages().en
+
+  it('scales the "preparing" window to the archive instead of a fixed 20 s', () => {
+    const cases: Array<[number, number]> = [
+      [10_000_000, 20_000], // floor: a small share still flashes feedback
+      [2_750_000_000, 137_500], // a friend's download-role archive
+      [19_000_000_000, 600_000], // ceiling: the 19 GB full-role archive
+    ]
+    for (const [zipBytes, expected] of cases) {
+      const dom = mountShare({ tiles: 1, total: 1, hasMore: false, zipBytes })
+      dom.tapZip()
+      expect(dom.timeouts.at(-1)!.ms).toBe(expected)
+    }
+  })
+
+  it('says a wait is expected, and puts the size back when the guard expires', () => {
+    const dom = mountShare({ tiles: 1, total: 1, hasMore: false, zipBytes: 2_750_000_000 })
+    dom.tapZip()
+    expect(dom.zipBtn.q['.zip-label']!.textContent).toBe(EN.downloadAllBusy)
+    // Not the size line: while it is building, the size is not the news.
+    expect(dom.zipBtn.q['.zip-meta']!.textContent).toBe(EN.downloadAllWait)
+
+    dom.timeouts.at(-1)!.fn()
+    expect(dom.zipBtn.q['.zip-label']!.textContent).toBe(EN.downloadAll)
+    expect(dom.zipBtn.q['.zip-meta']!.textContent).toBe('2.8 GB · 1 photo')
+  })
+
+  it('swallows a repeat tap while the archive is still being prepared', () => {
+    const dom = mountShare({ tiles: 1, total: 1, hasMore: false, zipBytes: 2_750_000_000 })
+    dom.tapZip()
+    const scheduled = dom.timeouts.length
+    let prevented = false
+    dom.zipBtn.fire('click', {
+      preventDefault: () => {
+        prevented = true
+      },
+    })
+    expect(prevented).toBe(true)
+    expect(dom.timeouts.length).toBe(scheduled)
   })
 })
 

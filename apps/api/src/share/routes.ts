@@ -19,7 +19,7 @@ import {
   SHARE_PAGE_SIZE,
   type SharePageSummary,
 } from './page/index.js'
-import { buildShareZip, estimateShareZipBytes } from './zip.js'
+import { buildShareZip, estimateShareZipBytes, isZipSpoolAborted, keepRequestAlive } from './zip.js'
 import { renderRendition } from '../renditions/render.js'
 
 // Initial locale (design §E) — parsed purely from the request header, same
@@ -256,15 +256,41 @@ export const shareRoutes = new Elysia({ name: 'shares' })
   )
   .get(
     '/s/:slug/zip',
-    async ({ params, query, set, request }) => {
+    async ({ params, query, set, request, server }) => {
       const locale = localeFromRequest(request)
       const access = await resolveShareAccess({ slug: params.slug, token: query.token })
       if (!access) return notFound(set, locale)
       if (!canDownloadFile(access.role)) return notFound(set, locale)
       const images = await listShareImages(access.share)
-      const response = await buildShareZip({ share: access.share, images, role: access.role })
-      response.headers.set('referrer-policy', 'no-referrer')
-      return response
+      // The archive is spooled to disk before a byte is served (zip.ts), so this
+      // handler is silent for the whole build — and `idleTimeout` (index.ts) is a
+      // time-to-NEXT-BYTE cap that Bun refuses to set above 255 s. Without a
+      // heartbeat the origin kills a multi-GB build on its own, no matter what
+      // the tunnel's origin timeout says.
+      const releaseSocket = keepRequestAlive({ server, request })
+      try {
+        const response = await buildShareZip({
+          share: access.share,
+          images,
+          role: access.role,
+          // `request.signal` fires while we are still inside the handler
+          // (measured on Bun 1.3.14: 505 ms after the socket died), which is
+          // exactly the phase the spool runs in — but only because the spool
+          // loop yields to the event loop; a disconnect cannot be delivered to a
+          // starved loop.
+          signal: request.signal,
+        })
+        response.headers.set('referrer-policy', 'no-referrer')
+        return response
+      } catch (err) {
+        // The visitor hung up mid-spool. Nobody is listening, so this is not an
+        // error to bubble into the unhandled-error log — answer with the same
+        // opaque 404 every other non-answer uses and keep the surface uniform.
+        if (isZipSpoolAborted(err)) return notFound(set, locale)
+        throw err
+      } finally {
+        releaseSocket()
+      }
     },
     {
       params: z.object({ slug: z.string() }),

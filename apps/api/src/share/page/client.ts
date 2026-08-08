@@ -585,17 +585,35 @@ export function mainScript(cfgJson: string, catalogueJson: string): string {
   var zipBtn = document.getElementById('zipBtn');
   function updateZipLabel() {
     if (!zipBtn) return;
+    var busy = zipBtn.getAttribute('aria-busy') === 'true';
     var label = zipBtn.querySelector('.zip-label');
     var meta = zipBtn.querySelector('.zip-meta');
-    if (label) label.textContent = t(zipBtn.getAttribute('aria-busy') === 'true' ? 'downloadAllBusy' : 'downloadAll');
-    if (meta) meta.textContent = formatBytes(C.zipBytes) + ' · ' + photoCount(C.total);
+    if (label) label.textContent = t(busy ? 'downloadAllBusy' : 'downloadAll');
+    // While it is preparing, the size line is replaced by the one thing the
+    // visitor actually needs to know: nothing will appear for a while, and they
+    // do not have to do anything about it.
+    if (meta) meta.textContent = busy ? t('downloadAllWait') : formatBytes(C.zipBytes) + ' · ' + photoCount(C.total);
+  }
+  // How long "preparing" stays up. The server builds the whole archive on disk
+  // before it sends a single byte, so time-to-first-byte IS the build time — a
+  // fixed 20 s was sized for the old streaming behaviour and un-busied the
+  // button while a multi-GB build still had minutes to run, which reads as "it
+  // failed, tap it again". 20 MB/s is deliberately pessimistic (originals off
+  // spinning disk); over-estimating only leaves an honest "preparing" up a
+  // little too long, under-estimating is the bug being fixed. Clamped so a tiny
+  // share still flashes feedback and a huge one cannot lock the button forever
+  // if the build died.
+  function zipBusyMs() {
+    return Math.min(Math.max(20000, Math.round((C.zipBytes || 0) / 20000)), 600000);
   }
   if (zipBtn) {
     var zipTimer = 0;
     zipBtn.addEventListener('click', function (e) {
       // A bare <a> gave zero visible feedback on tap, which on a phone reads as
-      // "nothing happened" and invites repeat taps — each one starting another
-      // multi-GB transfer. The href is untouched, so the no-JS path still works.
+      // "nothing happened" and invites repeat taps. A repeat tap is no longer
+      // destructive (the server joins the in-flight build instead of restarting
+      // it), but it still starts a second transfer of a multi-GB archive. The
+      // href is untouched, so the no-JS path still works.
       if (zipBtn.getAttribute('aria-busy') === 'true') { e.preventDefault(); return; }
       zipBtn.setAttribute('aria-busy', 'true');
       updateZipLabel();
@@ -603,7 +621,7 @@ export function mainScript(cfgJson: string, catalogueJson: string): string {
       zipTimer = setTimeout(function () {
         zipBtn.removeAttribute('aria-busy');
         updateZipLabel();
-      }, 20000);
+      }, zipBusyMs());
     });
   }
 

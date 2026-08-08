@@ -488,7 +488,7 @@ Routes (all under `/s`, public):
 - `GET /s/:slug/file/:id?raw=1` — attachment download of the original JPEG (download/full roles only;
   `raw=1` → paired RAF, full role only). view-role tokens 404 entirely.
 - `GET /s/:slug/zip` — `makeZip` (client-zip) over a generator: original files (+ RAFs for full-role
-  tokens) with `predictLength` → Content-Length. view-role tokens 404. Filename `<slug>.zip`.
+  tokens). view-role tokens 404. Filename `<slug>.zip`.
   Sizing is an async `stat` pass bounded to 32 in flight (`statAll`), never `statSync` in a loop
   (2000 blocking syscalls before the first ZIP byte stalls every other visitor's renditions) and
   never an unbounded `Promise.all` (2000 fds inside a 1 GB container). An indexed file missing from
@@ -497,12 +497,106 @@ Routes (all under `/s`, public):
   `Content-Disposition` for both this route and `/file/:id` comes from the shared
   `share/attachment.ts` RFC 5987 builder — both interpolate user-controlled values (a slug, an
   indexed `rel_path`), where a raw `"`/newline is response splitting.
-  TWO KNOWN CAVEATS (documented in code + README):
-  1. Bun.serve ReadableStream responses may ignore TCP backpressure (oven-sh/bun#32469) — acceptable
-     single-user risk, re-check at upgrade time.
-  2. Bun drops the `Content-Length` on a streamed response (measured 2026-08, at the origin inside
-     the container) → chunked encoding, no browser progress bar. Mitigated in the page's ZIP label,
-     not here.
+
+  **The archive is spooled to disk and served as a `Bun.file` — it is never a streamed
+  `ReadableStream` response.** This replaces the old `new Response(makeZip(...))`, and it resolves
+  both of the caveats this section used to carry.
+
+  *Why.* Caveat 1 stopped being a theoretical risk and took the service down: pulling `segeln-25`'s
+  550-image full-role archive (~19 GB) at ~5 MB/s drove the container to its cgroup ceiling and
+  restarted it after only ~227 MB had reached the client — twice, at 1 GiB and again at 2 GiB, so
+  raising the limit only moved the wall. The cause is oven-sh/bun#32469: `readStreamIntoSink`
+  drains a JS body into uWS's unbounded buffer and discards `sink.write()`'s result, so the producer
+  never learns the socket is backed up. Fixed upstream by PR #32553, merged 434 commits **after** the
+  v1.3.14 tag — no released Bun contains it.
+
+  *What was measured on 1.3.14* (raw TCP client that sends the request and then reads nothing).
+  Every JS-body shape ran the producer free to the cap instead of applying backpressure:
+
+  | body | produced | RSS |
+  |-|-|-|
+  | default `ReadableStream` (hwm 1) | 512 MiB (cap) | +1318 MiB |
+  | `type:'bytes'` (BYOB) | 512 MiB (cap) | +512 MiB |
+  | async-generator body | 512 MiB (cap) | +514 MiB |
+  | `type:'direct'` + `await flush(true)` | 2048 MiB (cap) | 4.4 GiB |
+  | **`new Response(Bun.file(p))`** | **kernel-paced** | **+8 MiB on a 3 GiB file** |
+
+  `type:'direct'` is the decisive one: `controller.write()` returned the full positive chunk length
+  on every call and never the negative backpressure sentinel, because Bun's `HTTPServerWritable`
+  reports success unconditionally. There is no `desiredSize`, `drain`, or buffered-bytes signal for
+  HTTP responses either (`backpressureLimit`/`getBufferedAmount()` are WebSocket-only). Wrapping
+  client-zip is pointless for the same reason: it is already strictly pull-driven with a one-chunk
+  lookahead, and the layer ignoring backpressure sits *above* whatever stream it is handed — any zip
+  library hits the identical wall. `Bun.file` is bounded because Bun serves it with `sendfile(2)`:
+  the kernel paces it against the socket and no JS sink exists. So memory is now bounded **by
+  construction**, at any archive size and any client speed, because no part of the response is
+  produced by JavaScript.
+
+  *Mechanics.* `DATA_DIR/zip-spool/<key>.zip`, a content-addressed LRU cache with the same shape as
+  the rendition cache (§6): key = `sha256(v1|slug|role|<entry name|size|mtime>…)` first 32 hex, mtime
+  as the LRU clock, oldest-first eviction under a 40 GiB budget swept *before* each build, and
+  `.part` files reaped after 6 h. Built via `rename(2)` from a `.part`, so a reader can only ever
+  observe a complete archive. The spool loop flushes its sink before the next `read()`, so exactly
+  one chunk is resident — measured 51 MiB RSS spooling 500 MiB at ~400 MiB/s. Concurrent requests for
+  the same key join one build.
+
+  **A build outlives its visitors.** A disconnect detaches the waiter and returns the same opaque 404
+  as every other non-answer; it does not touch the build. This used to be refcounted — the last
+  waiter out aborted the build, whose error path unlinks the `.part` — and that turns every timeout
+  into an unrecoverable loop rather than a slow first attempt: cloudflared drops the 19 GB build at
+  ~100 s, minutes of work are deleted, the retry starts from zero and 524s again, forever. A started
+  build now always runs to completion and publishes, so attempt two is a `tryStat` hit and one
+  `sendfile`. The work is bounded (a fixed file set), deduped by key, and swept under the same LRU
+  budget as every other spool.
+
+  **The spool loop yields to the event loop every 20 ms.** Nothing in it is a real suspension point —
+  a page-cached `Bun.file` read and a `FileSink.flush()` both settle as microtasks, and the CRC32
+  pass is pure CPU — so it used to drain the microtask queue for the whole build while the macrotask
+  queue starved: measured over 400 MiB, a 50 ms `setInterval` ticked **zero** times in 967 ms. That
+  starves `GET /health`, and the container `HEALTHCHECK` (10 s interval, 5 s timeout, 3 retries)
+  restarts the container mid-build — the original "restarts during a big download" symptom by another
+  route. It also queued every other visitor's page and rendition behind the archive, and made the
+  disconnect above undeliverable. The yield costs nothing measurable (400 MiB: 967 → 975 ms, 434 →
+  430 MB/s, 15 of an ideal 20 ticks) and everything time-based during a build depends on it.
+
+  `request.signal` does fire in this phase (measured: 505 ms after the socket died) because the spool
+  runs before a response exists; #17591's unreliable-abort applies to streaming responses, which this
+  no longer is.
+
+  **The origin's own idle timeout is a ceiling on the build, and needs a heartbeat.**
+  `Bun.serve({ idleTimeout })` is time-to-*next*-byte, and a spooling request emits nothing until the
+  archive is complete (the old streamed body reset that timer continuously). Bun refuses any value
+  above 255 (`Bun.serve expects idleTimeout to be 255 or less`, measured), so raising the tunnel's
+  origin timeout cannot lift it. The zip route therefore re-arms its own request's timer while it
+  waits (`keepRequestAlive`, `server.timeout(request, 255)` every 30 s), leaving every other route on
+  the global setting. Measured against `idleTimeout: 2`: a request silent for 20 s was still served
+  when re-armed every 500 ms, and died at 4.1 s without. (`timeout(request, 0)` would disable the
+  timer outright, but then a stalled client in the `sendfile` phase holds a socket forever. Trap
+  worth recording: uWS's timer has a ~4 s granularity, so a re-arm of ≤4 s can still be swept at the
+  next tick — irrelevant at 255.) The heartbeat is a timer, so it only fires because the spool loop
+  yields.
+
+  *Consequences.* Caveat 2 is gone — `Content-Length` is real again (a file response keeps it, so the
+  browser gets its progress bar and ETA back). `Range` now works: Bun answers a byte-range request
+  against a `Bun.file` response with its own 206 + `Content-Range`, so a 19 GB download that dies an
+  hour in **resumes** instead of restarting — worth more than everything else here. Re-downloading
+  costs one `sendfile`. The `estimateShareZipBytes` label (§7 share page) is unchanged and still
+  useful as an up-front size hint on the page itself.
+
+  *The cost, and the one open deployment question.* Time-to-first-byte is now the spool time, paid
+  once per (share, role, file-set). A friend's download-role archive (~2.75 GB of JPEGs, SSD) spools
+  in seconds; the owner's 19 GB full-role archive reads ~16.5 GB of RAFs off `/mnt/hdd` and can still
+  exceed **Cloudflare's ~100 s origin-response timeout** (share.jkrumm.com is on the `cloudflared`
+  network), which 524s the first attempt. That is now a slow first attempt rather than a dead share:
+  the build survives the dropped connection and publishes, so the retry is served from the spool. The
+  share page tells the visitor to expect it — the download control stays in its "preparing" state for
+  an archive-sized window (`zipBytes` at a pessimistic 20 MB/s, clamped to 20 s…10 min) with a
+  localized line saying the archive is being packed and will start on its own, instead of the fixed
+  20 s that used to un-busy the button while minutes of build were still to come. If the first-attempt
+  524 becomes annoying anyway, the fixes in order are: raise the tunnel's origin timeout in
+  `homelab`; or upgrade past #32553 (`oven/bun:canary` pinned by digest, or 1.3.15/1.4.0 when it
+  ships) and drop the spool entirely — at which point the streamed response becomes correct again and
+  the only reason to keep spooling is `Range` support.
 
 `token` is threaded into every asset URL by the page renderer.
 

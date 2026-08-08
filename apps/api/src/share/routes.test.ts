@@ -453,6 +453,35 @@ describe('GET /s/:slug/zip (role-gated)', () => {
       expect(res.headers.get('content-type')).toBe('application/zip')
     }
   })
+
+  // The archive is spooled to disk and served as a `Bun.file` (design §7), which
+  // is what restores a truthful Content-Length — Bun used to drop the predicted
+  // one from the old ReadableStream body and fall back to chunked encoding.
+  it('carries a Content-Length equal to the archive it actually serves', async () => {
+    const res = await get('/s/gallery/zip?token=dl-tk')
+    const declared = Number(res.headers.get('content-length'))
+    expect(declared).toBeGreaterThan(0)
+    expect((await res.arrayBuffer()).byteLength).toBe(declared)
+  })
+
+  it('answers the same opaque 404 when the visitor hangs up mid-spool', async () => {
+    // A fresh slug so the spool is a guaranteed cache miss and the abort path is
+    // the one under test.
+    const abortId = await seedShare({ slug: 'zip-abort' })
+    await seedToken(abortId, 'abort-tk', 'download')
+
+    const ac = new AbortController()
+    const pending = app.handle(
+      new Request('http://localhost/s/zip-abort/zip?token=abort-tk', { signal: ac.signal }),
+    )
+    ac.abort()
+    const res = await pending
+    // Byte-identical to every other denial — a disconnect must not become a
+    // distinguishable response on the public surface.
+    expect(res.status).toBe(404)
+    expect(await res.text()).toBe(OPAQUE)
+    expect(res.headers.get('referrer-policy')).toBe('no-referrer')
+  })
 })
 
 describe('the removed unlock route', () => {
