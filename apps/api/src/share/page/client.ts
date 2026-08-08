@@ -157,6 +157,7 @@ export function mainScript(cfgJson: string, catalogueJson: string): string {
     });
     updateAlts();
     updateZipLabel();
+    updateZipTooLarge();
   }
   function formatDateRange(dates) {
     if (!dates || dates.length === 0) return '';
@@ -625,6 +626,18 @@ export function mainScript(cfgJson: string, catalogueJson: string): string {
     });
   }
 
+  // ---- download-all: over-cap explanatory copy (design §7) ----
+  // Present only when the server rendered the \`.zip-toolarge\` branch instead
+  // of \`zipBtn\` — both carry a \`{size}\` the generic [data-i18n] swap can't
+  // fill, exactly like \`.zip-meta\` above, so a language switch re-fills them
+  // here rather than relying on the generic loop.
+  function updateZipTooLarge() {
+    var body = document.getElementById('zipTooLargeBody');
+    if (body) body.textContent = fill(t('zipTooLarge'), { size: formatBytes(C.zipBytes) });
+    var hint = document.getElementById('zipTooLargeHint');
+    if (hint) hint.textContent = fill(t('zipTooLargeSmallerHint'), { size: formatBytes(C.zipSmallerBytes || 0) });
+  }
+
   // ---- remembered shares (brief §I) ----
   function escapeForHtml(s) {
     return String(s).replace(/[&<>"']/g, function (c) {
@@ -688,6 +701,51 @@ export function notFoundScript(catalogueJson: string): string {
   document.querySelectorAll('[data-i18n]').forEach(function (el) {
     el.textContent = t(el.getAttribute('data-i18n'));
   });
+})();`
+}
+
+/**
+ * Standalone script for the 413 "archive too large" page
+ * (`renderZipTooLargePage`, design §7) — reached only via a stale/bookmarked
+ * hit on `/s/:slug/zip` for a share whose predicted archive exceeds
+ * `SHARE_ZIP_MAX_BYTES` (the share page itself never links to one). Mirrors
+ * `notFoundScript`'s reload-free `localStorage` language swap for the plain
+ * strings, but its two size-carrying strings need `{size}` interpolation the
+ * generic `[data-i18n]` loop can't do, so `fill()`/`formatBytes()` are
+ * reimplemented here rather than pulled in from `mainScript` (this page never
+ * loads it).
+ */
+export function zipTooLargeScript(catalogueJson: string, dataJson: string): string {
+  return `(function () {
+  var CATALOGUE = ${catalogueJson};
+  var DATA = ${dataJson};
+  var lang = document.documentElement.lang || 'en';
+  function t(key) {
+    var forLang = CATALOGUE[lang] || CATALOGUE.en;
+    return forLang[key] || CATALOGUE.en[key] || '';
+  }
+  function fill(template, values) {
+    return String(template).replace(/\\{(\\w+)\\}/g, function (match, key) {
+      return Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : match;
+    });
+  }
+  var BYTE_UNITS = ['B', 'kB', 'MB', 'GB', 'TB'];
+  function formatBytes(bytes) {
+    if (!isFinite(bytes) || bytes <= 0) return '0 B';
+    var unit = 0, value = bytes;
+    while (value >= 1000 && unit < BYTE_UNITS.length - 1) { value /= 1000; unit++; }
+    var digits = unit === 0 ? 0 : (value < 10 ? 1 : 0);
+    try {
+      return new Intl.NumberFormat(lang, { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(value) + ' ' + BYTE_UNITS[unit];
+    } catch (e) { return value.toFixed(digits) + ' ' + BYTE_UNITS[unit]; }
+  }
+  document.querySelectorAll('[data-i18n]').forEach(function (el) {
+    el.textContent = t(el.getAttribute('data-i18n'));
+  });
+  var body = document.getElementById('zipTooLargeBody');
+  if (body) body.textContent = fill(t('zipTooLarge'), { size: formatBytes(DATA.zipBytes) });
+  var hint = document.getElementById('zipTooLargeHint');
+  if (hint && DATA.zipSmallerBytes != null) hint.textContent = fill(t('zipTooLargeSmallerHint'), { size: formatBytes(DATA.zipSmallerBytes) });
 })();`
 }
 

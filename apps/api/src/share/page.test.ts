@@ -61,6 +61,8 @@ function makeSummary(over: Partial<SharePageSummary> = {}): SharePageSummary {
     firstCaptureAt: '2026-06-01T10:00:00.000Z',
     lastCaptureAt: '2026-06-01T10:00:00.000Z',
     zipBytes: 1234,
+    zipOverCap: false,
+    zipSmallerBytes: null,
     ...over,
   }
 }

@@ -17,6 +17,7 @@ import { attachment } from './attachment.js'
 import {
   buildShareZip,
   estimateShareZipBytes,
+  isZipTooLarge,
   keepRequestAlive,
   zipSpoolKey,
   zipSpoolPath,
@@ -722,6 +723,49 @@ describe('estimateShareZipBytes', () => {
       rawPaths: [`${SUB}/DSCF0001.RAF`, `${SUB}/NOPE.RAF`],
     })
     expect(bytes).toBe(2048 + 4096)
+  })
+})
+
+// SHARE_ZIP_MAX_BYTES (design §7): the server must refuse an over-cap archive
+// before ever touching the spool — no `.part`, no published `.zip`, nothing on
+// disk for a request that can never be answered.
+describe('buildShareZip: SHARE_ZIP_MAX_BYTES cap', () => {
+  const originalCap = env.SHARE_ZIP_MAX_BYTES
+
+  afterAll(() => {
+    env.SHARE_ZIP_MAX_BYTES = originalCap
+  })
+
+  it('rejects with ZipTooLargeError and spools nothing when the predicted size exceeds the cap', async () => {
+    env.SHARE_ZIP_MAX_BYTES = 1
+    const share = shareOf({ slug: 'over-cap' })
+    const images = [
+      imageOf({ id: 10 }),
+      imageOf({ id: 11, relPath: `${SUB}/DSCF0002.JPG`, stem: 'DSCF0002' }),
+    ]
+    const before = spoolFiles()
+
+    let caught: unknown
+    try {
+      await buildShareZip({ share, images, role: 'download' })
+    } catch (err) {
+      caught = err
+    }
+    expect(isZipTooLarge(caught)).toBe(true)
+    // Nothing was ever written to the spool directory — not even a `.part`.
+    expect(spoolFiles()).toEqual(before)
+  })
+
+  it('still serves the archive when the predicted size is under the cap', async () => {
+    env.SHARE_ZIP_MAX_BYTES = 10 * 1024 ** 3
+    const share = shareOf({ slug: 'under-cap' })
+    const images = [
+      imageOf({ id: 10 }),
+      imageOf({ id: 11, relPath: `${SUB}/DSCF0002.JPG`, stem: 'DSCF0002' }),
+    ]
+    const res = await buildShareZip({ share, images, role: 'download' })
+    expect(res.status).toBe(200)
+    expect(Number(res.headers.get('content-length'))).toBeGreaterThan(0)
   })
 })
 

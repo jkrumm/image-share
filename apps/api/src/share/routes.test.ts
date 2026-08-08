@@ -7,6 +7,7 @@ import { createDb, db as defaultDb, runMigrations, type Db } from '../db/index.j
 import { images, shareImages, shares, shareTokens } from '../db/schema.js'
 import { setShareDb } from '../lib/share-auth.js'
 import { rootBaseDir } from '../lib/paths.js'
+import { env } from '../env.js'
 import { render404Page } from './page/index.js'
 import { shareRoutes } from './routes.js'
 
@@ -538,6 +539,111 @@ describe('GET /s/:slug/zip (role-gated)', () => {
       const res = await get('/s/gallery/zip?token=dl-tk')
       expect(res.status).toBe(200)
     })
+  })
+})
+
+// SHARE_ZIP_MAX_BYTES (design §7). A dedicated share/dir/tokens with PRECISE,
+// controlled byte sizes (real on-disk bytes, matching the seeded `file_size`
+// column exactly) so the cap boundary is exact rather than approximate:
+// JPEG alone (2000 B) stays comfortably under a 3000 B cap even with zip
+// container overhead; JPEG + the paired RAF (5000 B) comfortably clears it.
+describe('SHARE_ZIP_MAX_BYTES cap (design §7)', () => {
+  const CAP_SUB = `share-routes-cap-${process.pid}-${Date.now()}`
+  const JPEG_BYTES = 2000
+  const RAF_BYTES = 5000
+  const CAP = 3000
+  const originalCap = env.SHARE_ZIP_MAX_BYTES
+
+  beforeAll(async () => {
+    mkdirSync(join(fujiBase, CAP_SUB), { recursive: true })
+    mkdirSync(join(rawsBase, CAP_SUB), { recursive: true })
+    writeFileSync(join(fujiBase, CAP_SUB, 'cap.jpg'), Buffer.alloc(JPEG_BYTES, 0x11))
+    writeFileSync(join(rawsBase, CAP_SUB, 'cap.RAF'), Buffer.alloc(RAF_BYTES, 0x22))
+    await seedImage({
+      relPath: `${CAP_SUB}/cap.jpg`,
+      dir: CAP_SUB,
+      stem: 'cap',
+      fileSize: JPEG_BYTES,
+      rawPath: `${CAP_SUB}/cap.RAF`,
+    })
+    const capShareId = await seedShare({ slug: 'capshare', dir: CAP_SUB })
+    await seedToken(capShareId, 'cap-dl-tk', 'download')
+    await seedToken(capShareId, 'cap-full-tk', 'full')
+    env.SHARE_ZIP_MAX_BYTES = CAP
+  })
+
+  afterAll(() => {
+    env.SHARE_ZIP_MAX_BYTES = originalCap
+    rmSync(join(fujiBase, CAP_SUB), { recursive: true, force: true })
+    rmSync(join(rawsBase, CAP_SUB), { recursive: true, force: true })
+  })
+
+  it('download-role zip (2000 B, under the 3000 B cap) still serves end to end', async () => {
+    const res = await get('/s/capshare/zip?token=cap-dl-tk')
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toBe('application/zip')
+    const buf = await res.arrayBuffer()
+    expect(buf.byteLength).toBe(Number(res.headers.get('content-length')))
+    expect(buf.byteLength).toBeGreaterThan(JPEG_BYTES)
+  })
+
+  it('full-role zip (2000 + 5000 B, over the cap) answers 413, never the opaque 404', async () => {
+    const res = await get('/s/capshare/zip?token=cap-full-tk')
+    expect(res.status).toBe(413)
+    expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8')
+    expect(res.headers.get('referrer-policy')).toBe('no-referrer')
+    const body = await res.text()
+    expect(body).not.toBe(OPAQUE)
+    expect(body).toContain('id="zipTooLargeBody"')
+  })
+
+  it('a still-denied token (view role) gets the identical opaque 404 regardless of the cap', async () => {
+    const galleryView = await get('/s/gallery/zip?token=view-tk')
+    const capView = await get(`/s/capshare/zip?token=nonexistent`)
+    expect(galleryView.status).toBe(404)
+    expect(capView.status).toBe(404)
+    expect(await galleryView.text()).toBe(OPAQUE)
+    expect(await capView.text()).toBe(OPAQUE)
+  })
+
+  it('over-cap 413 page explains the limit in de/en/es and never renders as the 404', async () => {
+    const bodies: Record<string, string> = {}
+    for (const lang of ['de', 'en', 'es']) {
+      const res = await app.handle(
+        new Request('http://localhost/s/capshare/zip?token=cap-full-tk', {
+          headers: { 'accept-language': lang },
+        }),
+      )
+      expect(res.status).toBe(413)
+      bodies[lang] = await res.text()
+    }
+    expect(bodies['de']).toContain('Archiv zu groß zum Herunterladen')
+    expect(bodies['en']).toContain('Archive too large to download')
+    expect(bodies['es']).toContain('Archivo demasiado grande para descargar')
+    // Distinct copy per locale — never a byte-identical page across languages.
+    expect(new Set(Object.values(bodies)).size).toBe(3)
+  })
+
+  it('the share page never renders a working zip control for the over-cap role, and explains why', async () => {
+    const html = await (await get('/s/capshare?token=cap-full-tk')).text()
+    expect(html).not.toContain('id="zipBtn"')
+    expect(html).toContain('id="zipTooLargeBody"')
+    // The full-role total (JPEG+RAF, 7000 B) is over the cap; the JPEG-only
+    // total (2000 B) is under it, so the "would fit without RAWs" hint fires.
+    expect(html).toContain('id="zipTooLargeHint"')
+  })
+
+  it('the share page still renders a working zip control for the under-cap role', async () => {
+    const html = await (await get('/s/capshare?token=cap-dl-tk')).text()
+    expect(html).toContain('id="zipBtn"')
+    expect(html).not.toContain('id="zipTooLargeBody"')
+  })
+
+  it('view-role page rendering is unaffected by the cap (no zip affordance either way)', async () => {
+    await seedToken(await seedShare({ slug: 'capshare-view', dir: CAP_SUB }), 'cap-view-tk', 'view')
+    const html = await (await get('/s/capshare-view?token=cap-view-tk')).text()
+    expect(html).not.toContain('id="zipBtn"')
+    expect(html).not.toContain('id="zipTooLargeBody"')
   })
 })
 

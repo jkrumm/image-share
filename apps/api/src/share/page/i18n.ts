@@ -31,6 +31,24 @@ export interface Messages {
    * download at all for minutes — without this the page looks broken.
    */
   downloadAllWait: string
+  /**
+   * Replaces the download-all control entirely when the predicted archive
+   * exceeds `SHARE_ZIP_MAX_BYTES` (design §7) — that server refuses to build
+   * or serve it at all. `{size}` = the predicted archive size.
+   */
+  zipTooLarge: string
+  /**
+   * Appended only when a smaller variant of THIS SAME share's own photos would
+   * fit under the cap (concretely: a full-role share whose JPEGs alone are
+   * under the limit even though the paired RAFs push the whole archive over
+   * it). `{size}` = that smaller total. Never names another token or role —
+   * only a fact about this share's own JPEGs, which this token can already see.
+   */
+  zipTooLargeSmallerHint: string
+  /** `<title>`/`<h1>` of the standalone 413 page at `/s/:slug/zip`. */
+  zipTooLargeTitle: string
+  /** Link back to the share gallery from the standalone 413 page. */
+  zipTooLargeBack: string
   emptyState: string
   showMore: string
   lightboxClose: string
@@ -76,6 +94,12 @@ const MESSAGES: Record<Locale, Messages> = {
     downloadAll: 'Download all (.zip)',
     downloadAllBusy: 'Preparing download…',
     downloadAllWait: 'Packing the archive — large shares take a few minutes. It starts on its own.',
+    zipTooLarge:
+      'This share would be {size} as a single ZIP — too large to download in one piece. Open each photo and download it individually instead.',
+    zipTooLargeSmallerHint:
+      'Without the RAW files it would be about {size}, well under the limit — but this link always includes the RAW files, so individual downloads are still the way to get your photos.',
+    zipTooLargeTitle: 'Archive too large to download',
+    zipTooLargeBack: 'Back to the gallery',
     emptyState: 'No photos in this share yet.',
     showMore: 'Show more photos',
     lightboxClose: 'Close',
@@ -118,6 +142,12 @@ const MESSAGES: Record<Locale, Messages> = {
     downloadAllBusy: 'Download wird vorbereitet…',
     downloadAllWait:
       'Archiv wird gepackt — bei großen Shares dauert das ein paar Minuten. Es startet von selbst.',
+    zipTooLarge:
+      'Dieser Share wäre als ZIP {size} groß — zu groß für einen einzelnen Download. Lade jedes Foto stattdessen einzeln herunter.',
+    zipTooLargeSmallerHint:
+      'Ohne die RAW-Dateien wären es nur etwa {size}, deutlich unter dem Limit — dieser Link enthält aber immer die RAW-Dateien, daher bleibt der einzelne Download der Weg zu deinen Fotos.',
+    zipTooLargeTitle: 'Archiv zu groß zum Herunterladen',
+    zipTooLargeBack: 'Zurück zur Galerie',
     emptyState: 'Noch keine Fotos in diesem Share.',
     showMore: 'Weitere Fotos anzeigen',
     lightboxClose: 'Schließen',
@@ -159,6 +189,12 @@ const MESSAGES: Record<Locale, Messages> = {
     downloadAll: 'Descargar todo (.zip)',
     downloadAllBusy: 'Preparando la descarga…',
     downloadAllWait: 'Preparando el archivo: en shares grandes tarda unos minutos. Empieza solo.',
+    zipTooLarge:
+      'Este share pesaría {size} como un solo ZIP — demasiado grande para descargarlo de una vez. Descarga cada foto individualmente en su lugar.',
+    zipTooLargeSmallerHint:
+      'Sin los archivos RAW pesaría solo unos {size}, muy por debajo del límite — pero este enlace siempre incluye los archivos RAW, así que la descarga individual sigue siendo la forma de obtener tus fotos.',
+    zipTooLargeTitle: 'Archivo demasiado grande para descargar',
+    zipTooLargeBack: 'Volver a la galería',
     emptyState: 'Todavía no hay fotos en este share.',
     showMore: 'Mostrar más fotos',
     lightboxClose: 'Cerrar',

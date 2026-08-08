@@ -174,8 +174,17 @@ const SPOOL_HIGH_WATER = 4 * 1024 * 1024
  * property (123 GB free on the HomeLab SSD at the time of writing) and this
  * cache is rebuildable, so the only thing the number has to guarantee is that
  * the largest share's archive plus one more fits comfortably.
+ *
+ * Brought down from 40 GiB now that `SHARE_ZIP_MAX_BYTES` (env.ts, design §7)
+ * bounds every archive this route will ever build at 5 GiB — the old number
+ * was sized to fit the 19 GB `segeln-25` full-role archive that route no
+ * longer serves at all. 20 GiB is 4x the largest single archive possible now:
+ * comfortable room for several distinct (share, role) archives cached at
+ * once (this is a single-user service, not a fleet), a fraction of the 123 GB
+ * free, and a real ceiling — not just a lower one — on how much of that disk
+ * a misbehaving or misconfigured build could ever occupy.
  */
-const SPOOL_MAX_BYTES = 40 * 1024 ** 3
+const SPOOL_MAX_BYTES = 20 * 1024 ** 3
 
 /** A crashed spool leaves a `.part` behind; reap it rather than leak disk. */
 const SPOOL_PART_MAX_AGE_MS = 6 * 60 * 60 * 1000
@@ -279,6 +288,29 @@ export class ZipSpoolAbortedError extends Error {
 
 export function isZipSpoolAborted(err: unknown): boolean {
   return err instanceof ZipSpoolAbortedError
+}
+
+/**
+ * Thrown when a share's predicted archive exceeds `SHARE_ZIP_MAX_BYTES`
+ * (design §7) — `buildShareZip` refuses BEFORE ever touching the spool.
+ *
+ * Deliberately not the same signal as `ZipSpoolAbortedError`: this is not a
+ * denial (the token and role are both valid, the visitor is entitled to every
+ * byte), it is a capacity limit. `share/routes.ts` renders a dedicated 413
+ * page instead of the opaque 404 — conflating the two would tell a legitimate
+ * visitor with a real link that it is dead.
+ */
+export class ZipTooLargeError extends Error {
+  readonly predictedBytes: number
+  constructor(predictedBytes: number) {
+    super(`share zip exceeds SHARE_ZIP_MAX_BYTES: ${predictedBytes} > ${env.SHARE_ZIP_MAX_BYTES}`)
+    this.name = 'ZipTooLargeError'
+    this.predictedBytes = predictedBytes
+  }
+}
+
+export function isZipTooLarge(err: unknown): err is ZipTooLargeError {
+  return err instanceof ZipTooLargeError
 }
 
 /**
@@ -625,6 +657,10 @@ async function ensureSpool(input: {
  * Rejects with `ZipSpoolAbortedError` if the visitor disconnects while their
  * archive is still spooling — the build itself carries on, so their retry is a
  * cache hit rather than a second full rebuild (see `ensureSpool`).
+ *
+ * Rejects with `ZipTooLargeError` if the predicted archive exceeds
+ * `SHARE_ZIP_MAX_BYTES` — refused before the spool is ever touched, cold or
+ * warm request alike (design §7).
  */
 export async function buildShareZip(input: {
   share: ShareRow
@@ -667,6 +703,28 @@ export async function buildShareZip(input: {
     })
   }
 
+  // `predictLength` returns a bigint (Zip64 sizes outrun a safe integer in
+  // principle); every caller below only needs it as a headroom/cap figure.
+  // Computed unconditionally, BEFORE the cache check: it costs nothing extra
+  // (pure arithmetic over the stat pass already done above) and it is what
+  // lets the cap below refuse an oversized share before a single spool byte
+  // is written, on a cold OR a warm request alike.
+  const predictedLength = Number(
+    predictLength(entries.map((e) => ({ name: e.name, size: e.size }))),
+  )
+
+  // Refuse before ever touching the spool (design §7, `SHARE_ZIP_MAX_BYTES`).
+  // Measured on the live box: the 19 GB full-role `segeln-25` archive (JPEGs +
+  // paired RAFs) wedges the event loop hard enough that `/health` stops
+  // answering and the Docker healthcheck restarts the container — reproduced
+  // repeatedly — while the 3.78 GB download-role archive on the SAME share
+  // serves fine. `share/routes.ts` turns this into a 413, never the opaque
+  // 404: the token and role are both valid, this is a capacity limit, not a
+  // denial.
+  if (predictedLength > env.SHARE_ZIP_MAX_BYTES) {
+    throw new ZipTooLargeError(predictedLength)
+  }
+
   const key = zipSpoolKey({ share, role: input.role, entries })
   const path = zipSpoolPath(key)
   const cached = await tryStat(path)
@@ -680,9 +738,7 @@ export async function buildShareZip(input: {
       key,
       path,
       entries,
-      // `predictLength` returns a bigint (Zip64 sizes outrun a safe integer in
-      // principle); the sweep only needs it as a headroom number.
-      predictedLength: Number(predictLength(entries.map((e) => ({ name: e.name, size: e.size })))),
+      predictedLength,
       signal: input.signal,
     })
   }

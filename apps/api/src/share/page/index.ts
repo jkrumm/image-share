@@ -23,7 +23,14 @@ import {
   paletteCss,
   viewsCss,
 } from './styles.js'
-import { headScript, landingScript, mainScript, notFoundScript, SIZES_BY_VIEW } from './client.js'
+import {
+  headScript,
+  landingScript,
+  mainScript,
+  notFoundScript,
+  zipTooLargeScript,
+  SIZES_BY_VIEW,
+} from './client.js'
 
 // Server-rendered share/landing/404 pages (Stage 3 redesign — design §7). ALL
 // CSS + JS is inline — zero external requests. Every user-controlled string
@@ -42,6 +49,19 @@ export interface SharePageSummary {
   lastCaptureAt: string | null
   /** Predicted ZIP size in bytes, rendered into the download control's label. */
   zipBytes: number
+  /**
+   * True when `zipBytes` exceeds `SHARE_ZIP_MAX_BYTES` (design §7) — the
+   * server refuses to build that archive at all, so the download control must
+   * not render as a working link; explanatory copy takes its place.
+   */
+  zipOverCap: boolean
+  /**
+   * Set only when `zipOverCap` AND this share's own JPEGs alone would fit
+   * under the cap (a full-role share whose paired RAFs are what push it over)
+   * — the predicted byte total of just the JPEGs, for a "this part would fit"
+   * hint. `null` when there is nothing usefully smaller to mention.
+   */
+  zipSmallerBytes: number | null
 }
 
 export interface SharePageInput {
@@ -365,6 +385,8 @@ export function renderSharePage(input: SharePageInput): string {
     pageSize: SHARE_PAGE_SIZE,
     dates: days,
     zipBytes: summary.zipBytes,
+    zipOverCap: summary.zipOverCap,
+    zipSmallerBytes: summary.zipSmallerBytes,
     full: isFull,
     download: canDownload,
     raws: canRaw,
@@ -374,6 +396,27 @@ export function renderSharePage(input: SharePageInput): string {
   // Content-Length on a streamed response (see share/zip.ts) — without it the
   // visitor gets no progress bar and no ETA on a multi-GB download.
   const zipMeta = `${formatBytes(locale, summary.zipBytes)} · ${photoCountLabel(locale, summary.total)}`
+
+  // The download-all control, or — when the predicted archive exceeds
+  // SHARE_ZIP_MAX_BYTES (design §7) — explanatory copy in its place. The
+  // server refuses to build that archive at all, so offering a link to it
+  // would be a dead control, not a slow one.
+  const zipControlHtml = ((): string => {
+    if (!canDownload || summary.total === 0) return ''
+    if (!summary.zipOverCap) {
+      return `<a class="text-btn zip-btn" id="zipBtn" href="${escapeHtml(zipUrl)}"><span class="zip-label" data-i18n="downloadAll">${escapeHtml(m.downloadAll)}</span><span class="zip-meta">${escapeHtml(zipMeta)}</span></a>`
+    }
+    const body = interpolate(m.zipTooLarge, { size: formatBytes(locale, summary.zipBytes) })
+    const hint =
+      summary.zipSmallerBytes !== null
+        ? `<p class="zip-toolarge-hint" id="zipTooLargeHint">${escapeHtml(interpolate(m.zipTooLargeSmallerHint, { size: formatBytes(locale, summary.zipSmallerBytes) }))}</p>`
+        : ''
+    // Not `data-i18n` on either paragraph: both strings carry an interpolated
+    // `{size}`, so a language switch is handled by `updateZipTooLarge()`
+    // (client.ts) exactly like `.zip-meta` above — the generic `[data-i18n]`
+    // swap would otherwise clobber the size back to the raw, un-filled template.
+    return `<div class="zip-toolarge"><p class="zip-toolarge-body" id="zipTooLargeBody">${escapeHtml(body)}</p>${hint}</div>`
+  })()
 
   return `<!doctype html>
 <html lang="${locale}" data-view="stream">
@@ -400,11 +443,7 @@ ${controlsHtml(m, locale)}
     <p class="meta" id="meta">${escapeHtml(meta)}</p>
     ${noteHtml}
     <div class="actions">
-      ${
-        canDownload && summary.total > 0
-          ? `<a class="text-btn zip-btn" id="zipBtn" href="${escapeHtml(zipUrl)}"><span class="zip-label" data-i18n="downloadAll">${escapeHtml(m.downloadAll)}</span><span class="zip-meta">${escapeHtml(zipMeta)}</span></a>`
-          : ''
-      }
+      ${zipControlHtml}
       <button type="button" id="switcherBtn" class="text-btn" hidden data-i18n="switcherLabel" data-i18n-aria="switcherLabel" aria-label="${escapeHtml(m.switcherLabel)}">${escapeHtml(m.switcherLabel)}</button>
     </div>
     <div id="switcherMenu" class="switcher-menu" hidden></div>
@@ -517,6 +556,68 @@ ${notFoundCss()}
     <p data-i18n="notFoundBody">${escapeHtml(m.notFoundBody)}</p>
   </main>
 <script>${notFoundScript(jsonForScript(allMessages()))}</script>
+</body>
+</html>`
+}
+
+/**
+ * Rendered instead of the archive at `GET /s/:slug/zip` when the predicted
+ * ZIP exceeds `SHARE_ZIP_MAX_BYTES` (design §7) — status 413, deliberately
+ * NOT `render404Page`: the token and role are both valid, so telling a
+ * legitimate visitor their link is dead would be untrue, and it would collapse
+ * a capacity limit into the exact denial signal the public surface otherwise
+ * guarantees never fires on a valid token. Reached only via a direct or
+ * bookmarked hit on the zip route — `renderSharePage` never links to a
+ * control it cannot deliver (see its `zipControlHtml` branch), so a normal
+ * visitor sees the explanation on the share page itself, not this page.
+ */
+export function renderZipTooLargePage(input: {
+  locale: Locale
+  slug: string
+  token: string
+  zipBytes: number
+  /** JPEG-only total, when it alone would fit under the cap (full-role shares
+   *  only — a download-role zip already IS the JPEG-only total, so it is
+   *  never smaller than what already didn't fit). Reveals nothing about any
+   *  other token or role, only a fact about this share's own JPEGs, which
+   *  this same token can already see and download one by one. */
+  zipSmallerBytes: number | null
+}): string {
+  const { locale, slug, token, zipBytes, zipSmallerBytes } = input
+  const m = messages(locale)
+  const body = interpolate(m.zipTooLarge, { size: formatBytes(locale, zipBytes) })
+  const hint =
+    zipSmallerBytes !== null
+      ? `<p id="zipTooLargeHint">${escapeHtml(interpolate(m.zipTooLargeSmallerHint, { size: formatBytes(locale, zipSmallerBytes) }))}</p>`
+      : ''
+  const backHref = `/s/${encodeURIComponent(slug)}?${authQuery(token)}`
+  const data = { zipBytes, zipSmallerBytes }
+  return `<!doctype html>
+<html lang="${locale}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#121212" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="${FAVICON_SVG}">
+<title>${escapeHtml(m.zipTooLargeTitle)}</title>
+<script>${headScript()}</script>
+<style>
+${paletteCss()}
+${baseCss()}
+${notFoundCss()}
+</style>
+</head>
+<body>
+  <main>
+    <h1 data-i18n="zipTooLargeTitle">${escapeHtml(m.zipTooLargeTitle)}</h1>
+    <p id="zipTooLargeBody">${escapeHtml(body)}</p>
+    ${hint}
+    <p><a class="text-btn" href="${escapeHtml(backHref)}" data-i18n="zipTooLargeBack">${escapeHtml(m.zipTooLargeBack)}</a></p>
+  </main>
+<script>${zipTooLargeScript(jsonForScript(allMessages()), jsonForScript(data))}</script>
 </body>
 </html>`
 }

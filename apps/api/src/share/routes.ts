@@ -10,16 +10,24 @@ import {
 } from '../lib/share-auth.js'
 import { rootBaseDir, safeJoin } from '../lib/paths.js'
 import type { ShareRow } from '../db/schema.js'
+import { env } from '../env.js'
 import { attachment } from './attachment.js'
 import { parseAcceptLanguage, type Locale } from './page/i18n.js'
 import {
   render404Page,
   renderShareTiles,
   renderSharePage,
+  renderZipTooLargePage,
   SHARE_PAGE_SIZE,
   type SharePageSummary,
 } from './page/index.js'
-import { buildShareZip, estimateShareZipBytes, isZipSpoolAborted, keepRequestAlive } from './zip.js'
+import {
+  buildShareZip,
+  estimateShareZipBytes,
+  isZipSpoolAborted,
+  isZipTooLarge,
+  keepRequestAlive,
+} from './zip.js'
 import { renderRendition } from '../renditions/render.js'
 
 // Initial locale (design §E) — parsed purely from the request header, same
@@ -91,11 +99,22 @@ async function pageSummary(
   const zipBytes = wantsZip
     ? await estimateShareZipBytes({ totalFileSize: summary.totalFileSize, role, rawPaths })
     : 0
+  const zipOverCap = wantsZip && zipBytes > env.SHARE_ZIP_MAX_BYTES
+  // Only meaningful for a `full` role: its own JPEG total (`summary.totalFileSize`,
+  // already computed above with zero extra syscalls) is smaller than `zipBytes`
+  // exactly when the paired RAFs are what pushed it over the cap. A `download`
+  // role's zip already IS the JPEG total, so there is nothing smaller to offer.
+  const zipSmallerBytes =
+    zipOverCap && role === 'full' && summary.totalFileSize <= env.SHARE_ZIP_MAX_BYTES
+      ? summary.totalFileSize
+      : null
   return {
     total: summary.total,
     firstCaptureAt: summary.firstCaptureAt,
     lastCaptureAt: summary.lastCaptureAt,
     zipBytes,
+    zipOverCap,
+    zipSmallerBytes,
   }
 }
 
@@ -287,6 +306,34 @@ export const shareRoutes = new Elysia({ name: 'shares' })
         // error to bubble into the unhandled-error log — answer with the same
         // opaque 404 every other non-answer uses and keep the surface uniform.
         if (isZipSpoolAborted(err)) return notFound(set, locale)
+        // Predicted archive over SHARE_ZIP_MAX_BYTES (design §7): a 413, never
+        // the opaque 404 — the token and role are both valid, this is a
+        // capacity limit, not a denial, and conflating the two would tell a
+        // legitimate visitor with a real link that it is dead. Reachable only
+        // via a direct/bookmarked hit — the share page's own control never
+        // links to an archive it cannot deliver (see `zipControlHtml`).
+        if (isZipTooLarge(err)) {
+          set.status = 413
+          set.headers['content-type'] = 'text/html; charset=utf-8'
+          shareSecurityHeaders(set)
+          // A `download`-role zip already IS the JPEG-only total, so it is
+          // never smaller than what just failed to fit — only a `full` role
+          // whose JPEGs alone clear the cap gets the "smaller" hint, and it
+          // never references any other token or role, only this share's own
+          // photos, which this same token can already see one by one.
+          const jpegOnlyBytes = images.reduce((sum, image) => sum + image.fileSize, 0)
+          const zipSmallerBytes =
+            access.role === 'full' && jpegOnlyBytes <= env.SHARE_ZIP_MAX_BYTES
+              ? jpegOnlyBytes
+              : null
+          return renderZipTooLargePage({
+            locale,
+            slug: access.share.slug,
+            token: access.token,
+            zipBytes: err.predictedBytes,
+            zipSmallerBytes,
+          })
+        }
         throw err
       } finally {
         releaseSocket()
@@ -299,7 +346,7 @@ export const shareRoutes = new Elysia({ name: 'shares' })
         tags: ['Shares'],
         summary: 'ZIP of the whole share',
         description:
-          "Serves a `<slug>.zip` of original files (+ RAFs for full-role tokens) with a real Content-Length. This route implements no `Range` support of its own (see zip.ts); a syntactically valid single-range header may still get a 206/416 from Bun's own native, unsuppressible dispatch, but it can no longer diverge from the real archive bytes the way the removed per-request implementation could. A dropped download restarts from zero rather than resuming, though a retry is served from the spool cache rather than rebuilt. view-role tokens 404.",
+          "Serves a `<slug>.zip` of original files (+ RAFs for full-role tokens) with a real Content-Length. This route implements no `Range` support of its own (see zip.ts); a syntactically valid single-range header may still get a 206/416 from Bun's own native, unsuppressible dispatch, but it can no longer diverge from the real archive bytes the way the removed per-request implementation could. A dropped download restarts from zero rather than resuming, though a retry is served from the spool cache rather than rebuilt. view-role tokens 404. A predicted archive over `SHARE_ZIP_MAX_BYTES` answers 413 with an explanatory HTML page instead of building it — never the opaque 404, since the token and role are both valid.",
       },
     },
   )

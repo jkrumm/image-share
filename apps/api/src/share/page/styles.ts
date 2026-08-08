@@ -179,6 +179,11 @@ export function headCss(): string {
 .zip-btn { gap: .5rem; }
 .zip-btn .zip-meta { color: var(--muted); text-decoration: none; font-variant-numeric: tabular-nums; }
 .zip-btn[aria-busy='true'] { opacity: .6; cursor: progress; }
+/* Replaces the ZIP control entirely when the archive exceeds
+   SHARE_ZIP_MAX_BYTES (design §7) — explanatory copy, not a dead link. */
+.zip-toolarge { max-width: 34rem; font-size: .875rem; }
+.zip-toolarge-body { margin: 0; }
+.zip-toolarge-hint { margin: .375rem 0 0; color: var(--muted); }
 .switcher-menu {
   display: flex; flex-direction: column; gap: .25rem;
   padding: .75rem var(--pad-x); margin: 0 calc(var(--pad-x) * -1) 1rem;

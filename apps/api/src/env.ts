@@ -34,6 +34,21 @@ export const Env = z.object({
   // https://share.jkrumm.com (Caddy rewrites /<slug> → /s/<slug>).
   SHARE_BASE_URL: z.string().default('http://localhost:7720/s'),
 
+  // Cap on a share's PREDICTED ZIP size (design §7) — above this, `/s/:slug/zip`
+  // refuses to build or spool the archive at all. 5 GiB by default: comfortably
+  // above the verified-working 3.78 GB `segeln-25` download-role archive (550
+  // JPEGs, spooled and served fine) and far below the verified-fatal 19 GB
+  // full-role archive on the same share (JPEGs + paired RAFs) — SERVING that one
+  // wedges the event loop hard enough that `/health` stops answering and the
+  // Docker healthcheck restarts the container, reproduced repeatedly. This is a
+  // property of THIS box (RAM, spinning-disk spool throughput), not a portable
+  // constant, so unlike the sharp knobs below it is its own env var rather than
+  // hardcoded — do not raise it without re-measuring on the actual deployment.
+  SHARE_ZIP_MAX_BYTES: z.coerce
+    .number()
+    .int()
+    .default(5 * 1024 ** 3),
+
   // ── Public CDN (design §8) ────────────────────────────────────────────────
   // Base for published-image URLs: `${CDN_BASE}/<key minus img/ prefix>`.
   CDN_BASE: z.string().default('https://img.jkrumm.com'),

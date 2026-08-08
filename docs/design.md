@@ -652,21 +652,69 @@ Routes (all under `/s`, public):
   matters: the retry is a `sendfile` of an already-built archive, not a rebuild, so a dropped
   connection costs a re-download, not a re-pack.
 
-  *The cost, and the one open deployment question.* Time-to-first-byte is the spool time, paid once
-  per (share, role, file-set). A friend's download-role archive (~2.75 GB of JPEGs, SSD) spools in
-  seconds; the owner's 19 GB full-role archive reads ~16.5 GB of RAFs off `/mnt/hdd` and can still
-  exceed **Cloudflare's ~100 s origin-response timeout** (share.jkrumm.com is on the `cloudflared`
-  network), which 524s the first attempt. That is a slow first attempt rather than a dead share: the
-  build survives the dropped connection and publishes, so the retry is served from the spool. The
-  share page tells the visitor to expect it — the download control stays in its "preparing" state for
-  an archive-sized window (`zipBytes` at a pessimistic 20 MB/s, clamped to 20 s…10 min) with a
-  localized line saying the archive is being packed and will start on its own, instead of the fixed
-  20 s that used to un-busy the button while minutes of build were still to come. If the first-attempt
-  524 becomes annoying anyway, the fixes in order are: raise the tunnel's origin timeout in
-  `homelab`; or upgrade past #32553 (`oven/bun:canary` pinned by digest, or 1.3.15/1.4.0 when it
-  ships) and drop the spool entirely — at which point the streamed response becomes correct again.
-  `Range` is not coming back either way; the earlier reasoning for it (resumable multi-GB downloads)
-  is superseded by the spool cache making a retry cheap regardless.
+  *The cost.* Time-to-first-byte is the spool time, paid once per (share, role, file-set). A friend's
+  download-role archive (~2.75 GB of JPEGs, SSD) spools in seconds. The share page tells the visitor
+  to expect the wait for anything larger — the download control stays in its "preparing" state for an
+  archive-sized window (`zipBytes` at a pessimistic 20 MB/s, clamped to 20 s…10 min) with a localized
+  line saying the archive is being packed and will start on its own, instead of the fixed 20 s that
+  used to un-busy the button while minutes of build were still to come.
+
+  **`SHARE_ZIP_MAX_BYTES` (env.ts) — a hard cap on the predicted archive, below "slow" territory
+  entirely.** The paragraph this replaced described the 19 GB `segeln-25` full-role archive (JPEGs +
+  550 paired RAFs) as a *slow first attempt* that 524s against Cloudflare's ~100 s origin timeout and
+  then serves from the spool on retry. That turned out to understate the problem: measured directly
+  against the live box, SERVING that archive (not building it — the spool itself completes fine)
+  wedges the event loop hard enough that `GET /health` stops answering, the Docker `HEALTHCHECK`
+  times out three times in a row, and the container restarts — reproduced repeatedly, not a one-off.
+  The same share's download-role archive (JPEGs only, no RAFs) has none of this problem:
+
+  | role | entries | bytes | spool | serving |
+  |-|-|-|-|-|
+  | `download` (JPEGs only) | 550 | 3,781,140,298 (3.78 GB) | 31.4 s | **works** — ttfb 31.5 s, 0 restarts, RSS settles back to 66 MiB |
+  | `full` (JPEGs + 550 RAFs) | 1100 | 19,101,542,662 (19 GB) | 170 s | **fatal** — wedges `/health`, healthcheck restarts the container |
+
+  Controls that rule out the obvious suspects, all measured on the same box: a 191 MB archive
+  survives a full download, an abort after 1 MB, and a vanished client — 0 restarts, so this is not
+  generic client-abort handling. It is not the `Range` header (removed above) — a plain, Range-less
+  request kills the service just as fast; the first probe in the failing run returned 200 and the
+  service died immediately after. It is not memory growth during the spool — that phase is fine and
+  settles (see the bounded-memory story above); the fatal phase is *serving*, not spooling. So it is
+  specifically serving a very large already-spooled file that this Bun/Elysia runtime cannot survive,
+  and the threshold sits somewhere between 3.78 GB (fine) and 19 GB (fatal) — 5 GiB is the default,
+  chosen comfortably above the verified-working number and far below the verified-fatal one.
+
+  The check lives in `buildShareZip` (zip.ts): `predictLength` over the stat'd entry list is already
+  computed for the spool sweep's headroom, so testing it against the cap costs nothing extra, and it
+  runs BEFORE the spool is ever touched — an over-cap archive is never built, cold request or warm.
+  `share/routes.ts` turns the resulting `ZipTooLargeError` into **413, never the opaque 404**: the
+  token and role are both valid, so this is a capacity limit, not a denial, and folding it into the
+  same 404 as a revoked link would tell a legitimate visitor with a real share that it is dead.
+  `renderZipTooLargePage` (page/index.ts) explains the limit in the visitor's locale and links back to
+  the gallery — reachable only via a direct/bookmarked hit on `/s/:slug/zip`, because the share page's
+  own control (`renderSharePage`'s `zipControlHtml`) never renders a working link to an archive the
+  server has already decided it cannot build: over the cap, the `.zip-toolarge` block replaces it with
+  the same explanation inline, plus — for a `full`-role share whose JPEGs alone would clear the cap
+  (the paired RAFs are what pushed it over) — a hint stating that smaller total. That hint is a fact
+  about THIS share's own JPEGs, which the same token can already see and download one by one; it never
+  names or implies another token, role, or link, so it cannot become the kind of oracle the opaque-404
+  contract exists to prevent. `SPOOL_MAX_BYTES` (zip.ts) came down from 40 GiB to 20 GiB alongside this
+  — the old number was sized to fit the 19 GB archive this cap now refuses outright, so keeping it at
+  8x the largest possible archive (5 GiB) was pure headroom no longer needed; 20 GiB (4x) still leaves
+  comfortable room for several distinct (share, role) archives cached at once on a single-user service.
+
+  **Do not raise `SHARE_ZIP_MAX_BYTES` without re-measuring on the actual deployment.** It is a
+  property of this box (RAM, spinning-disk spool throughput, whatever in the Bun/Elysia response path
+  is actually wedging), not a portable constant, and the failure mode when it is wrong is the whole
+  container restarting under every visitor mid-download, not a clean error for one. If the underlying
+  wedge is ever root-caused and fixed (a Bun/Elysia upgrade, or isolating the cause below the response
+  layer), the fix is un-cap the route, not raise the number blind.
+
+  If the first-attempt-slow problem returns for an UNDER-cap archive (a large `download`-role share on
+  a slow spinning-disk read), the fixes in order are: raise the tunnel's origin timeout in `homelab`;
+  or upgrade past #32553 (`oven/bun:canary` pinned by digest, or 1.3.15/1.4.0 when it ships) and drop
+  the spool entirely — at which point the streamed response becomes correct again. `Range` is not
+  coming back either way; the earlier reasoning for it (resumable multi-GB downloads) is superseded by
+  the spool cache making a retry cheap regardless.
 
 `token` is threaded into every asset URL by the page renderer.
 
