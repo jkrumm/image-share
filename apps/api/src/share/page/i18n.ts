@@ -24,12 +24,23 @@ export interface Messages {
   langEn: string
   langEs: string
   downloadAll: string
+  downloadAllBusy: string
   emptyState: string
+  showMore: string
   lightboxClose: string
   lightboxPrev: string
   lightboxNext: string
+  lightboxLoading: string
   lightboxDownload: string
   lightboxDownloadRaw: string
+  lightboxRawHint: string
+  /** Screen-reader alt text; `{i}` = 1-based position, `{n}` = share total. */
+  photoAlt: string
+  /** Shown in the lightbox in place of the photo when it fails to decode/load. */
+  lightboxLoadFailed: string
+  /** Shown under "Show more photos" when a fragment fetch fails. */
+  moreLoadFailed: string
+  noscriptHint: string
   switcherLabel: string
   switcherHeading: string
   landingEmpty: string
@@ -37,6 +48,7 @@ export interface Messages {
   landingLastOpened: string
   landingRemove: string
   landingOpen: string
+  landingRedirect: string
   notFoundTitle: string
   notFoundBody: string
 }
@@ -56,12 +68,20 @@ const MESSAGES: Record<Locale, Messages> = {
     langEn: 'English',
     langEs: 'Español',
     downloadAll: 'Download all (.zip)',
+    downloadAllBusy: 'Preparing download…',
     emptyState: 'No photos in this share yet.',
+    showMore: 'Show more photos',
     lightboxClose: 'Close',
     lightboxPrev: 'Previous',
     lightboxNext: 'Next',
-    lightboxDownload: 'Download this photo',
+    lightboxLoading: 'Loading photo',
+    lightboxDownload: 'Download JPEG',
     lightboxDownloadRaw: 'Download RAW',
+    lightboxRawHint: 'RAW — most phones cannot open this file',
+    photoAlt: 'Photo {i} of {n}',
+    lightboxLoadFailed: "Couldn't load this photo.",
+    moreLoadFailed: "Couldn't load more photos. Try again.",
+    noscriptHint: 'JavaScript is off — open a photo with the link on its tile.',
     switcherLabel: 'Switch share',
     switcherHeading: 'Your shares',
     landingEmpty: 'Nothing to see here.',
@@ -69,6 +89,7 @@ const MESSAGES: Record<Locale, Messages> = {
     landingLastOpened: 'Last opened',
     landingRemove: 'Remove',
     landingOpen: 'Open',
+    landingRedirect: 'Opening your share…',
     notFoundTitle: 'This share does not exist or has been revoked',
     notFoundBody:
       'The link may be mistyped, the access token may have been rolled, or the share may have expired.',
@@ -87,12 +108,20 @@ const MESSAGES: Record<Locale, Messages> = {
     langEn: 'English',
     langEs: 'Español',
     downloadAll: 'Alle herunterladen (.zip)',
+    downloadAllBusy: 'Download wird vorbereitet…',
     emptyState: 'Noch keine Fotos in diesem Share.',
+    showMore: 'Weitere Fotos anzeigen',
     lightboxClose: 'Schließen',
     lightboxPrev: 'Zurück',
     lightboxNext: 'Weiter',
-    lightboxDownload: 'Foto herunterladen',
+    lightboxLoading: 'Foto wird geladen',
+    lightboxDownload: 'JPEG herunterladen',
     lightboxDownloadRaw: 'RAW herunterladen',
+    lightboxRawHint: 'RAW — die meisten Handys können diese Datei nicht öffnen',
+    photoAlt: 'Foto {i} von {n}',
+    lightboxLoadFailed: 'Dieses Foto konnte nicht geladen werden.',
+    moreLoadFailed: 'Weitere Fotos konnten nicht geladen werden. Bitte erneut versuchen.',
+    noscriptHint: 'JavaScript ist aus — öffne ein Foto über den Link auf der Kachel.',
     switcherLabel: 'Share wechseln',
     switcherHeading: 'Deine Shares',
     landingEmpty: 'Hier gibt es nichts zu sehen.',
@@ -100,6 +129,7 @@ const MESSAGES: Record<Locale, Messages> = {
     landingLastOpened: 'Zuletzt geöffnet',
     landingRemove: 'Entfernen',
     landingOpen: 'Öffnen',
+    landingRedirect: 'Dein Share wird geöffnet…',
     notFoundTitle: 'Dieser Share existiert nicht oder wurde widerrufen',
     notFoundBody:
       'Der Link könnte falsch sein, das Zugriffstoken wurde erneuert, oder der Share ist abgelaufen.',
@@ -118,12 +148,20 @@ const MESSAGES: Record<Locale, Messages> = {
     langEn: 'English',
     langEs: 'Español',
     downloadAll: 'Descargar todo (.zip)',
+    downloadAllBusy: 'Preparando la descarga…',
     emptyState: 'Todavía no hay fotos en este share.',
+    showMore: 'Mostrar más fotos',
     lightboxClose: 'Cerrar',
     lightboxPrev: 'Anterior',
     lightboxNext: 'Siguiente',
-    lightboxDownload: 'Descargar esta foto',
+    lightboxLoading: 'Cargando la foto',
+    lightboxDownload: 'Descargar JPEG',
     lightboxDownloadRaw: 'Descargar RAW',
+    lightboxRawHint: 'RAW — la mayoría de los móviles no pueden abrir este archivo',
+    photoAlt: 'Foto {i} de {n}',
+    lightboxLoadFailed: 'No se pudo cargar esta foto.',
+    moreLoadFailed: 'No se pudieron cargar más fotos. Inténtalo de nuevo.',
+    noscriptHint: 'JavaScript está desactivado — abre una foto con el enlace de su miniatura.',
     switcherLabel: 'Cambiar de share',
     switcherHeading: 'Tus shares',
     landingEmpty: 'Aquí no hay nada que ver.',
@@ -131,6 +169,7 @@ const MESSAGES: Record<Locale, Messages> = {
     landingLastOpened: 'Abierto por última vez',
     landingRemove: 'Eliminar',
     landingOpen: 'Abrir',
+    landingRedirect: 'Abriendo tu share…',
     notFoundTitle: 'Este share no existe o fue revocado',
     notFoundBody:
       'El enlace puede ser incorrecto, el token de acceso pudo haberse renovado, o el share pudo haber expirado.',
@@ -156,6 +195,36 @@ export function photoCountLabel(locale: Locale, count: number): string {
     default:
       return count === 1 ? '1 photo' : `${count} photos`
   }
+}
+
+const BYTE_UNITS = ['B', 'kB', 'MB', 'GB', 'TB'] as const
+
+/**
+ * Localized byte size for the ZIP/download labels ("1,9 GB" in de, "1.9 GB" in
+ * en). Decimal (1000-based) units, matching what every OS file manager and
+ * browser download panel shows — a friend comparing "1.9 GB" against their
+ * phone's free space should see the same number.
+ *
+ * Mirrored by `formatBytes` in `client.ts`'s `mainScript`, which recomputes the
+ * label after a language switch without a round-trip. Keep the two in step.
+ */
+export function formatBytes(locale: Locale, bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  let unit = 0
+  let value = bytes
+  while (value >= 1000 && unit < BYTE_UNITS.length - 1) {
+    value /= 1000
+    unit += 1
+  }
+  const digits = unit === 0 ? 0 : value < 10 ? 1 : 0
+  return `${new Intl.NumberFormat(locale, { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(value)} ${BYTE_UNITS[unit]}`
+}
+
+/** Substitute `{key}` placeholders in a catalogue string (`photoAlt`). */
+export function interpolate(template: string, values: Record<string, string | number>): string {
+  return template.replace(/\{(\w+)\}/g, (match, key: string) =>
+    key in values ? String(values[key]) : match,
+  )
 }
 
 function isLocale(tag: string): tag is Locale {

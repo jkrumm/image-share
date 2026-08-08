@@ -1,25 +1,26 @@
-import { basename } from 'node:path'
 import { Elysia } from 'elysia'
 import { z } from 'zod'
 import {
   getShareImageById,
   listShareImages,
   resolveShareAccess,
+  shareImageSummary,
+  shareRawPaths,
   type ShareTokenRole,
 } from '../lib/share-auth.js'
 import { rootBaseDir, safeJoin } from '../lib/paths.js'
+import type { ShareRow } from '../db/schema.js'
+import { attachment } from './attachment.js'
 import { parseAcceptLanguage, type Locale } from './page/i18n.js'
-import { render404Page, renderSharePage } from './page/index.js'
-import { buildShareZip } from './zip.js'
+import {
+  render404Page,
+  renderShareTiles,
+  renderSharePage,
+  SHARE_PAGE_SIZE,
+  type SharePageSummary,
+} from './page/index.js'
+import { buildShareZip, estimateShareZipBytes } from './zip.js'
 import { renderRendition } from '../renditions/render.js'
-
-// Content-Disposition attachment header with an ASCII-safe fallback filename
-// plus an RFC 5987 UTF-8 variant. `basename` strips any directory component.
-function attachment(name: string): string {
-  const safe = basename(name)
-  const ascii = safe.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_')
-  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(safe)}`
-}
 
 // Initial locale (design §E) — parsed purely from the request header, same
 // input every denial page and the share page itself resolve from. Never
@@ -28,25 +29,42 @@ function localeFromRequest(request: Request): Locale {
   return parseAcceptLanguage(request.headers.get('accept-language'))
 }
 
+type ResponseSet = { status?: number | string; headers: Record<string, string | number> }
+
+/**
+ * `Referrer-Policy: no-referrer` on EVERY share response, including the denial
+ * page. The access token lives in the query string, so any outbound navigation
+ * from a share page (a link in the note, a RAW download opened elsewhere) would
+ * otherwise hand the full tokenised URL to a third party in the `Referer`
+ * header — a silent, permanent grant of the share to whoever received it.
+ */
+function shareSecurityHeaders(set: ResponseSet): void {
+  set.headers['referrer-policy'] = 'no-referrer'
+}
+
 // Serve the opaque 404 page. Every denial cause funnels through here so the
 // public surface never distinguishes an unknown slug from a revoked token,
 // an out-of-share id, or a size/route the token does not permit.
-function notFound(
-  set: { status?: number | string; headers: Record<string, string | number> },
-  locale: Locale,
-): string {
+function notFound(set: ResponseSet, locale: Locale): string {
   set.status = 404
   set.headers['content-type'] = 'text/html; charset=utf-8'
+  shareSecurityHeaders(set)
   return render404Page(locale)
 }
 
-// Role gating (design §7 rework): `view` sees thumb/med renditions only;
+// Role gating (design §7 rework): `view` sees thumb/small/med renditions only;
 // `download` adds full-size renditions + original JPEG download/zip;
 // `full` adds paired RAF download/zip on top of `download`.
+//
+// `small` (900px) sits with `thumb`/`med` in every role: it exists purely as an
+// intermediate srcset candidate so a retina phone in grid/bento view stops
+// pulling the 1600px one, and it is a smaller rendition than `med`, which every
+// role already reaches. Withholding it from `view` would leak nothing and cost
+// those visitors the bandwidth win.
 const IMG_SIZES_BY_ROLE: Record<ShareTokenRole, ReadonlySet<string>> = {
-  view: new Set(['thumb', 'med']),
-  download: new Set(['thumb', 'med', 'full']),
-  full: new Set(['thumb', 'med', 'full']),
+  view: new Set(['thumb', 'small', 'med']),
+  download: new Set(['thumb', 'small', 'med', 'full']),
+  full: new Set(['thumb', 'small', 'med', 'full']),
 }
 
 function canDownloadFile(role: ShareTokenRole): boolean {
@@ -55,6 +73,30 @@ function canDownloadFile(role: ShareTokenRole): boolean {
 
 function canDownloadRaw(role: ShareTokenRole): boolean {
   return role === 'full'
+}
+
+/**
+ * Aggregate header facts + the predicted ZIP size for the download label.
+ * `withZipBytes` is false for the progressive-reveal fragment, which renders
+ * no header and must not re-pay the RAF stat pass on every scroll page.
+ */
+async function pageSummary(
+  share: ShareRow,
+  role: ShareTokenRole,
+  withZipBytes: boolean,
+): Promise<SharePageSummary> {
+  const summary = await shareImageSummary(share)
+  const wantsZip = withZipBytes && canDownloadFile(role)
+  const rawPaths = wantsZip && role === 'full' ? await shareRawPaths(share) : []
+  const zipBytes = wantsZip
+    ? await estimateShareZipBytes({ totalFileSize: summary.totalFileSize, role, rawPaths })
+    : 0
+  return {
+    total: summary.total,
+    firstCaptureAt: summary.firstCaptureAt,
+    lastCaptureAt: summary.lastCaptureAt,
+    zipBytes,
+  }
 }
 
 // Public share surface, all under `/s` (design §7). No bearer auth — access is
@@ -74,6 +116,7 @@ export const shareRoutes = new Elysia({ name: 'shares' })
     void error
     set.status = 404
     set.headers['content-type'] = 'text/html; charset=utf-8'
+    set.headers['referrer-policy'] = 'no-referrer'
     return render404Page(localeFromRequest(request))
   })
   .get(
@@ -83,24 +126,52 @@ export const shareRoutes = new Elysia({ name: 'shares' })
       const access = await resolveShareAccess({ slug: params.slug, token: query.token })
       // Invalid token / unknown slug / expired share → opaque 404.
       if (!access) return notFound(set, locale)
-      const images = await listShareImages(access.share)
-      set.headers['content-type'] = 'text/html; charset=utf-8'
-      return renderSharePage({
+      const isFragment = query.frag === 1
+      const summary = await pageSummary(access.share, access.role, !isFragment)
+      const outOfRange = query.from >= summary.total
+      // An out-of-range `from` (hand-edited, or a stale link after the share
+      // shrank) falls back to the first window rather than an empty gallery —
+      // but ONLY for the non-fragment (full document) case. A fragment request
+      // is `loadMore()` walking forward from a client-cached `total` that may
+      // now be stale (nightly reindex / PATCH / keyword edit shrank the share
+      // mid-session); resetting `from` to 0 there would re-serve tiles the
+      // client already appended, duplicating them indefinitely as it keeps
+      // advancing past a `total` the server no longer agrees with. The
+      // fragment must instead return an empty window so the client stops.
+      const from = outOfRange && !isFragment ? 0 : query.from
+      const images =
+        outOfRange && isFragment
+          ? []
+          : await listShareImages(access.share, { limit: SHARE_PAGE_SIZE, offset: from })
+      const input = {
         share: access.share,
         images,
+        from,
+        summary,
         token: access.token,
         role: access.role,
         locale,
-      })
+      }
+      set.headers['content-type'] = 'text/html; charset=utf-8'
+      // The URL contains the token, so a shared cache must never keep the body.
+      set.headers['cache-control'] = 'private, no-store'
+      shareSecurityHeaders(set)
+      // `frag=1` is the progressive-reveal fragment: the same window of tiles
+      // with no surrounding document, appended client-side by the page script.
+      return isFragment ? renderShareTiles(input) : renderSharePage(input)
     },
     {
       params: z.object({ slug: z.string() }),
-      query: z.object({ token: z.string().optional() }),
+      query: z.object({
+        token: z.string().optional(),
+        from: z.coerce.number().int().min(0).default(0),
+        frag: z.coerce.number().int().min(0).max(1).default(0),
+      }),
       detail: {
         tags: ['Shares'],
         summary: 'Public share gallery page',
         description:
-          'Server-rendered responsive gallery + lightbox for a share. Requires a valid `token`. Any invalid/rolled/expired/missing case renders the same opaque 404 page.',
+          'Server-rendered responsive gallery + lightbox for a share, in windows of 60 tiles (`from` offsets the window, `frag=1` returns just the tiles for progressive reveal). Requires a valid `token`. Any invalid/rolled/expired/missing case renders the same opaque 404 page.',
       },
     },
   )
@@ -126,19 +197,20 @@ export const shareRoutes = new Elysia({ name: 'shares' })
       })
       set.headers['cache-control'] = 'private, max-age=31536000, immutable'
       set.headers['content-type'] = rendition.contentType
+      shareSecurityHeaders(set)
       return Bun.file(rendition.path)
     },
     {
       params: z.object({ slug: z.string(), id: z.coerce.number().int() }),
       query: z.object({
         token: z.string().optional(),
-        size: z.enum(['thumb', 'med', 'full']).default('med'),
+        size: z.enum(['thumb', 'small', 'med', 'full']).default('med'),
       }),
       detail: {
         tags: ['Shares'],
         summary: 'Share rendition bytes',
         description:
-          'Returns rendition bytes (thumb/med/full) for an image belonging to the share, cached immutably for a year. `full` is only served to download/full-role tokens; the id must belong to the share or the request 404s.',
+          'Returns rendition bytes (thumb/small/med/full) for an image belonging to the share, cached immutably for a year. `full` is only served to download/full-role tokens; the id must belong to the share or the request 404s.',
       },
     },
   )
@@ -152,6 +224,7 @@ export const shareRoutes = new Elysia({ name: 'shares' })
       if (!canDownloadFile(access.role)) return notFound(set, locale)
       const image = await getShareImageById(access.share, params.id)
       if (!image) return notFound(set, locale)
+      shareSecurityHeaders(set)
 
       if (query.raw === 1) {
         // Paired RAF — only a full-role token, and only when a pairing exists.
@@ -189,7 +262,9 @@ export const shareRoutes = new Elysia({ name: 'shares' })
       if (!access) return notFound(set, locale)
       if (!canDownloadFile(access.role)) return notFound(set, locale)
       const images = await listShareImages(access.share)
-      return buildShareZip({ share: access.share, images, role: access.role })
+      const response = await buildShareZip({ share: access.share, images, role: access.role })
+      response.headers.set('referrer-policy', 'no-referrer')
+      return response
     },
     {
       params: z.object({ slug: z.string() }),

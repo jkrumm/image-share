@@ -56,6 +56,22 @@ export function bentoSpanFor(dims: BentoDims, index: number, columns = Infinity)
   return clampSpan({ colSpan: 1, rowSpan: 1 }, columns)
 }
 
+/**
+ * Row span to use where the bento grid is only TWO columns wide (every phone,
+ * i.e. the sub-640px breakpoint).
+ *
+ * A tile that spans both columns is the full content width, so with the
+ * uniform `grid-auto-rows` height a 3:2 frame — which is the entire Fuji
+ * library — was rendered as a ~2.5:1 letterbox strip with ~40% of the photo
+ * cropped away by `object-fit: cover`. Two rows plus the gap is almost exactly
+ * 2/3 of the content width, i.e. an uncropped 3:2 (see the `grid-auto-rows`
+ * calc in styles.ts). Tiles that occupy one column keep their own row span:
+ * they are half-width, so the same row height already frames them sensibly.
+ */
+export function narrowRowSpan(span: BentoSpan): number {
+  return span.colSpan >= 2 ? 2 : span.rowSpan
+}
+
 /** Compute spans for every image in order (design §C). */
 export function computeBentoSpans(images: readonly BentoDims[], columns = Infinity): BentoSpan[] {
   return images.map((dims, index) => bentoSpanFor(dims, index, columns))

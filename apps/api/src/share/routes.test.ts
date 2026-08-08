@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { Elysia } from 'elysia'
 import sharp from 'sharp'
 import { createDb, db as defaultDb, runMigrations, type Db } from '../db/index.js'
-import { images, shares, shareTokens } from '../db/schema.js'
+import { images, shareImages, shares, shareTokens } from '../db/schema.js'
 import { setShareDb } from '../lib/share-auth.js'
 import { rootBaseDir } from '../lib/paths.js'
 import { render404Page } from './page/index.js'
@@ -77,6 +77,8 @@ async function seedImage(over: Partial<typeof images.$inferInsert> = {}): Promis
 let imageId: number
 let pairedImageId: number
 let subImageId: number
+let earlyImageId: number
+let rafRowId: number
 const OPAQUE = render404Page()
 
 beforeAll(async () => {
@@ -134,6 +136,36 @@ beforeAll(async () => {
   })
   const flatId = await seedShare({ slug: 'flat', recursive: false })
   await seedToken(flatId, 'flat-tk', 'full')
+
+  // A selection share, written the way the admin used to write one: newest
+  // first (the grid's default captureAt/desc browse sort), plus a `.RAF` row of
+  // the kind that could enter `share_images` before POST/PATCH vetted the ids.
+  await sharp({
+    create: { width: 40, height: 30, channels: 3, background: { r: 1, g: 2, b: 3 } },
+  })
+    .jpeg()
+    .toFile(join(fujiBase, SUB, 'early.jpg'))
+  earlyImageId = await seedImage({
+    relPath: `${SUB}/early.jpg`,
+    stem: 'early',
+    captureAt: '2026-05-01T00:00:00.000Z',
+  })
+  rafRowId = await seedImage({
+    root: 'raws',
+    relPath: `${SUB}/paired.RAF`,
+    dir: SUB,
+    stem: 'paired',
+    ext: 'raf',
+    kind: 'raw',
+    captureAt: '2026-04-01T00:00:00.000Z',
+  })
+  const picksId = await seedShare({ slug: 'picks', sourceType: 'selection', root: null, dir: null })
+  await seedToken(picksId, 'picks-tk', 'full')
+  await db.insert(shareImages).values([
+    { shareId: picksId, imageId: rafRowId, position: 0 },
+    { shareId: picksId, imageId, position: 1 },
+    { shareId: picksId, imageId: earlyImageId, position: 2 },
+  ])
 })
 
 afterAll(() => {
@@ -207,6 +239,37 @@ describe('non-recursive folder share', () => {
   })
 })
 
+// ── What the friend actually receives from a selection share ─────────────────
+describe('selection share on the public surface', () => {
+  it('ships oldest-first, whatever order the tiles were written in', async () => {
+    const html = await (await get('/s/picks?token=picks-tk')).text()
+    const early = html.indexOf(`/s/picks/img/${earlyImageId}?`)
+    const later = html.indexOf(`/s/picks/img/${imageId}?`)
+    expect(early).toBeGreaterThan(-1)
+    expect(later).toBeGreaterThan(-1)
+    // The share was written newest-first; the gallery must still read forwards.
+    expect(early).toBeLessThan(later)
+  })
+
+  it('never renders — or serves — a RAF tile, so no tile can 500', async () => {
+    const html = await (await get('/s/picks?token=picks-tk')).text()
+    expect(html).not.toContain(`/s/picks/img/${rafRowId}?`)
+    // sharp cannot decode a .RAF: without the fail-closed filter this is a 500
+    // on the friend's page rather than the surface's single opaque 404.
+    for (const path of [
+      `/s/picks/img/${rafRowId}?token=picks-tk&size=thumb`,
+      `/s/picks/img/${rafRowId}?token=picks-tk&size=med`,
+      `/s/picks/file/${rafRowId}?token=picks-tk`,
+    ]) {
+      const res = await get(path)
+      expect(res.status).toBe(404)
+      expect(await res.text()).toBe(OPAQUE)
+    }
+    // Control: the JPEGs in the same share are reachable with the same token.
+    expect((await get(`/s/picks/img/${imageId}?token=picks-tk&size=med`)).status).toBe(200)
+  })
+})
+
 describe('GET /s/:slug/img/:id (role-gated sizes)', () => {
   it('404s an id that does not belong to the share', async () => {
     const res = await get(`/s/gallery/img/999999?token=full-tk&size=med`)
@@ -214,21 +277,135 @@ describe('GET /s/:slug/img/:id (role-gated sizes)', () => {
     expect(await res.text()).toBe(OPAQUE)
   })
 
-  it('view: thumb/med ok, full denied', async () => {
-    expect((await get(`/s/gallery/img/${imageId}?token=view-tk&size=thumb`)).status).toBe(200)
-    expect((await get(`/s/gallery/img/${imageId}?token=view-tk&size=med`)).status).toBe(200)
+  it('view: thumb/small/med ok, full denied', async () => {
+    for (const size of ['thumb', 'small', 'med']) {
+      expect((await get(`/s/gallery/img/${imageId}?token=view-tk&size=${size}`)).status).toBe(200)
+    }
     const full = await get(`/s/gallery/img/${imageId}?token=view-tk&size=full`)
     expect(full.status).toBe(404)
     expect(await full.text()).toBe(OPAQUE)
   })
 
-  it('download and full: thumb/med/full all ok', async () => {
+  it('download and full: thumb/small/med/full all ok', async () => {
     for (const token of ['dl-tk', 'full-tk']) {
-      for (const size of ['thumb', 'med', 'full']) {
+      for (const size of ['thumb', 'small', 'med', 'full']) {
         const res = await get(`/s/gallery/img/${imageId}?token=${token}&size=${size}`)
         expect(res.status).toBe(200)
       }
     }
+  })
+
+  // The full role/size permission table, asserted as one grid so a new size can
+  // never be silently added to the wrong role.
+  it('the whole role × size table collapses every denial to the SAME 404 body', async () => {
+    const allowed: Record<string, ReadonlySet<string>> = {
+      'view-tk': new Set(['thumb', 'small', 'med']),
+      'dl-tk': new Set(['thumb', 'small', 'med', 'full']),
+      'full-tk': new Set(['thumb', 'small', 'med', 'full']),
+    }
+    for (const [token, sizes] of Object.entries(allowed)) {
+      for (const size of ['thumb', 'small', 'med', 'full']) {
+        const res = await get(`/s/gallery/img/${imageId}?token=${token}&size=${size}`)
+        if (sizes.has(size)) {
+          expect(res.status).toBe(200)
+        } else {
+          expect(res.status).toBe(404)
+          expect(await res.text()).toBe(OPAQUE)
+        }
+      }
+      // A size that does not exist at all is the same opaque 404 — never a
+      // validation error that would distinguish it from a role denial.
+      const bogus = await get(`/s/gallery/img/${imageId}?token=${token}&size=huge`)
+      expect(bogus.status).toBe(404)
+      expect(await bogus.text()).toBe(OPAQUE)
+    }
+  })
+})
+
+describe('share response headers', () => {
+  it('sets Referrer-Policy: no-referrer on every share route, denials included', async () => {
+    const paths = [
+      '/s/gallery?token=view-tk',
+      `/s/gallery/img/${imageId}?token=view-tk&size=thumb`,
+      `/s/gallery/file/${imageId}?token=dl-tk`,
+      '/s/gallery/zip?token=dl-tk',
+      '/s/unknown?token=nope',
+      `/s/gallery/img/${imageId}?token=view-tk&size=full`,
+    ]
+    for (const path of paths) {
+      const res = await get(path)
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer')
+    }
+  })
+
+  it('never lets a shared cache keep the tokenised share HTML', async () => {
+    const res = await get('/s/gallery?token=view-tk')
+    expect(res.headers.get('cache-control')).toBe('private, no-store')
+  })
+})
+
+describe('GET /s/:slug — progressive reveal window', () => {
+  it('serves only tiles for frag=1, and the full document otherwise', async () => {
+    const full = await (await get('/s/gallery?token=view-tk')).text()
+    expect(full).toContain('<!doctype html>')
+
+    const frag = await get('/s/gallery?token=view-tk&frag=1')
+    expect(frag.status).toBe(200)
+    const body = await frag.text()
+    expect(body).not.toContain('<!doctype html>')
+    expect(body).toContain('<figure class="tile')
+  })
+
+  it('an out-of-range `from` falls back to the first window instead of an empty gallery', async () => {
+    const html = await (await get('/s/gallery?token=view-tk&from=9999')).text()
+    expect(html).toContain(`/s/gallery/img/${imageId}?size=thumb&amp;token=view-tk`)
+  })
+
+  it('an out-of-range `from` on a fragment request returns an empty window, not the first one again', async () => {
+    // Repro: the client cached a stale (larger) `total` and keeps walking
+    // `loadMore()` forward past a share that shrank mid-session. Falling back
+    // to window 0 here would re-serve already-appended tiles forever.
+    const res = await get('/s/gallery?token=view-tk&frag=1&from=9999')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body).not.toContain('<figure class="tile')
+  })
+
+  it('a denied token gets the opaque 404 on the fragment route too', async () => {
+    const res = await get('/s/gallery?token=rolled&frag=1')
+    expect(res.status).toBe(404)
+    expect(await res.text()).toBe(OPAQUE)
+  })
+})
+
+describe('no-JS reachability', () => {
+  it('every tile is a plain <a href> to a rendition the role may open', async () => {
+    const viewHtml = await (await get('/s/gallery?token=view-tk')).text()
+    expect(viewHtml).toContain(
+      `<a class="tile-btn" href="/s/gallery/img/${imageId}?size=med&amp;token=view-tk"`,
+    )
+    const dlHtml = await (await get('/s/gallery?token=dl-tk')).text()
+    expect(dlHtml).toContain(
+      `<a class="tile-btn" href="/s/gallery/img/${imageId}?size=full&amp;token=dl-tk"`,
+    )
+    // …and that href actually resolves for that role.
+    expect((await get(`/s/gallery/img/${imageId}?size=med&token=view-tk`)).status).toBe(200)
+    expect((await get(`/s/gallery/img/${imageId}?size=full&token=dl-tk`)).status).toBe(200)
+  })
+})
+
+describe('the ZIP size label', () => {
+  it('renders the predicted byte total and photo count into the control', async () => {
+    const html = await (await get('/s/gallery?token=dl-tk')).text()
+    // Two 40x30 JPEG fixtures — small, but the label must be present and real.
+    expect(html).toMatch(/class="zip-meta">[\d.,]+ (B|kB|MB|GB) · \d+ photos</)
+    expect(html).toMatch(/"zipBytes":[1-9]\d*/)
+  })
+
+  it('a view-role page has no ZIP control at all', async () => {
+    const html = await (await get('/s/gallery?token=view-tk')).text()
+    expect(html).not.toContain('id="zipBtn"')
+    expect(html).toContain('"zipBytes":0')
   })
 })
 

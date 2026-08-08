@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { bentoSpanFor, computeBentoSpans } from './layout.js'
+import { bentoSpanFor, computeBentoSpans, narrowRowSpan } from './layout.js'
 
 describe('bentoSpanFor', () => {
   it('spans landscape images 2 columns', () => {
@@ -32,6 +32,25 @@ describe('bentoSpanFor', () => {
   it('clamps spans to the given column count', () => {
     expect(bentoSpanFor({ width: 4000, height: 3000 }, 6, 1)).toEqual({ colSpan: 1, rowSpan: 1 })
     expect(bentoSpanFor({ width: 4000, height: 3000 }, 0, 2)).toEqual({ colSpan: 2, rowSpan: 1 })
+  })
+})
+
+describe('narrowRowSpan', () => {
+  // On a phone the bento grid has exactly two columns, so a 2-column tile is
+  // the full content width. With one uniform row height it rendered every 3:2
+  // frame — i.e. the whole library — as a ~2.5:1 strip with ~40% cropped off.
+  it('gives a full-width landscape tile two rows so a 3:2 frame is not cropped', () => {
+    expect(narrowRowSpan(bentoSpanFor({ width: 4000, height: 3000 }, 0))).toBe(2)
+  })
+
+  it('keeps the every-7th 2x2 hero at two rows', () => {
+    expect(narrowRowSpan(bentoSpanFor({ width: 4000, height: 3000 }, 6))).toBe(2)
+  })
+
+  it('leaves half-width tiles alone', () => {
+    expect(narrowRowSpan(bentoSpanFor({ width: 1000, height: 1000 }, 0))).toBe(1)
+    expect(narrowRowSpan(bentoSpanFor({ width: 3000, height: 4000 }, 0))).toBe(2)
+    expect(narrowRowSpan(bentoSpanFor({ width: null, height: null }, 0))).toBe(1)
   })
 })
 

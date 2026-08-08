@@ -3,7 +3,8 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ImageRow, ShareRow } from '../db/schema.js'
 import { rootBaseDir } from '../lib/paths.js'
-import { buildShareZip } from './zip.js'
+import { attachment } from './attachment.js'
+import { buildShareZip, estimateShareZipBytes } from './zip.js'
 
 // Unique temp subtree under the real (dev-default) roots so buildShareZip's
 // env-based path resolution finds the fixtures. Never touches real photo trees.
@@ -19,6 +20,7 @@ function shareOf(over: Partial<ShareRow> = {}): ShareRow {
     sourceType: 'folder',
     root: 'fuji',
     dir: SUB,
+    album: null,
     recursive: true,
     minRating: null,
     expiresAt: null,
@@ -46,6 +48,7 @@ function imageOf(over: Partial<ImageRow> = {}): ImageRow {
     height: 3000,
     rawPath: null,
     indexedAt: '2026-06-02T00:00:00.000Z',
+    keywordsIndexedAt: '2026-06-02T00:00:00.000Z',
     ...over,
   }
 }
@@ -82,7 +85,7 @@ describe('buildShareZip (download/full roles)', () => {
       imageOf({ id: 10 }),
       imageOf({ id: 11, relPath: `${SUB}/DSCF0002.JPG`, stem: 'DSCF0002' }),
     ]
-    const res = buildShareZip({ share, images, role: 'download' })
+    const res = await buildShareZip({ share, images, role: 'download' })
     expect(res.headers.get('content-type')).toBe('application/zip')
     expect(res.headers.get('content-disposition')).toContain('trip.zip')
     // Content-Length is predicted up front (files on disk, sizes known).
@@ -105,14 +108,94 @@ describe('buildShareZip (download/full roles)', () => {
     const image = imageOf({ id: 10, rawPath: `${SUB}/DSCF0001.RAF` })
 
     const withoutRaw = await bytesOf(
-      buildShareZip({ share: shareOf(), images: [image], role: 'download' }),
+      await buildShareZip({ share: shareOf(), images: [image], role: 'download' }),
     )
     expect(asLatin1(withoutRaw)).not.toContain('DSCF0001.RAF')
 
     const withRaw = await bytesOf(
-      buildShareZip({ share: shareOf(), images: [image], role: 'full' }),
+      await buildShareZip({ share: shareOf(), images: [image], role: 'full' }),
     )
     expect(asLatin1(withRaw)).toContain('DSCF0001.RAF')
     expect(withRaw.length).toBeGreaterThan(withoutRaw.length)
+  })
+
+  it('skips a file that is indexed but missing on disk, keeping the rest', async () => {
+    // The visitor-facing failure must stay "the other photos still download",
+    // never an error page — a single stale row would otherwise kill the share.
+    const images = [
+      imageOf({ id: 10 }),
+      imageOf({ id: 12, relPath: `${SUB}/GONE.JPG`, stem: 'GONE' }),
+      imageOf({ id: 11, relPath: `${SUB}/DSCF0002.JPG`, stem: 'DSCF0002' }),
+    ]
+    const res = await buildShareZip({ share: shareOf(), images, role: 'download' })
+    expect(res.status).toBe(200)
+    const text = asLatin1(await bytesOf(res))
+    expect(text).toContain('DSCF0001.JPG')
+    expect(text).toContain('DSCF0002.JPG')
+    expect(text).not.toContain('GONE.JPG')
+  })
+
+  it('escapes the slug in Content-Disposition via the shared RFC 5987 helper', async () => {
+    const res = await buildShareZip({
+      share: shareOf({ slug: 'sömmer "24"' }),
+      images: [imageOf()],
+      role: 'download',
+    })
+    const cd = res.headers.get('content-disposition') ?? ''
+    // The quoted-string fallback must not be terminable by the slug itself.
+    expect(cd).toBe(attachment('sömmer "24".zip'))
+    expect(cd).toContain('filename="s_mmer _24_.zip"')
+    expect(cd).toContain("filename*=UTF-8''s%C3%B6mmer%20%2224%22.zip")
+  })
+
+  it('produces a byte length equal to the predicted content-length for a full-role zip', async () => {
+    const image = imageOf({ id: 10, rawPath: `${SUB}/DSCF0001.RAF` })
+    const res = await buildShareZip({ share: shareOf(), images: [image], role: 'full' })
+    const buf = await bytesOf(res)
+    expect(buf.length).toBe(Number(res.headers.get('content-length')))
+  })
+})
+
+describe('estimateShareZipBytes', () => {
+  it('uses the indexed file-size sum for a download-role share (no syscalls)', async () => {
+    const bytes = await estimateShareZipBytes({
+      totalFileSize: 1_900_000_000,
+      role: 'download',
+      // Ignored for a download role — RAFs are not in that archive.
+      rawPaths: [`${SUB}/DSCF0001.RAF`],
+    })
+    expect(bytes).toBe(1_900_000_000)
+  })
+
+  it('adds the on-disk RAF sizes for a full-role share', async () => {
+    const bytes = await estimateShareZipBytes({
+      totalFileSize: 2048,
+      role: 'full',
+      rawPaths: [`${SUB}/DSCF0001.RAF`],
+    })
+    expect(bytes).toBe(2048 + 4096)
+  })
+
+  it('ignores a missing RAF rather than throwing', async () => {
+    const bytes = await estimateShareZipBytes({
+      totalFileSize: 2048,
+      role: 'full',
+      rawPaths: [`${SUB}/DSCF0001.RAF`, `${SUB}/NOPE.RAF`],
+    })
+    expect(bytes).toBe(2048 + 4096)
+  })
+})
+
+describe('attachment', () => {
+  it('sanitizes the ASCII fallback and percent-encodes the UTF-8 variant', () => {
+    expect(attachment('a/b/DSCF "1".JPG')).toBe(
+      `attachment; filename="DSCF _1_.JPG"; filename*=UTF-8''DSCF%20%221%22.JPG`,
+    )
+  })
+
+  it('strips a directory component and any newline injection attempt', () => {
+    const value = attachment('x/\r\nX-Evil: 1\r\n.jpg')
+    expect(value).not.toContain('\r')
+    expect(value).not.toContain('\n')
   })
 })
