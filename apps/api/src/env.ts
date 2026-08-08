@@ -72,6 +72,13 @@ export const Env = z.object({
   // under the size cap.
   RENDITION_MAX_AGE_DAYS: z.coerce.number().int().default(90),
   RENDITION_CACHE_MAX_GB: z.coerce.number().default(20),
+  // Max sharp operations in flight process-wide (renditions/render.ts). The
+  // HomeLab container has 4 CPU cores and a 1 GB memory limit, while one cold
+  // 26 MP Fuji decode costs ~450 ms plus a large pixel buffer — so an unbounded
+  // burst (the first visitor to a cold 100-photo share fires ~100 renders at
+  // once) is an OOM-kill candidate. 3 keeps the box busy without starving the
+  // event loop or stacking decode buffers past the memory limit.
+  RENDITION_CONCURRENCY: z.coerce.number().int().min(1).default(3),
 })
 
 export type EnvShape = z.infer<typeof Env>

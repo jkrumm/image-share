@@ -59,15 +59,29 @@ describe('renditionCacheKey', () => {
     expect(renditionCacheKey({ ...base, size: 'med' })).not.toBe(key)
     expect(renditionCacheKey({ ...base, relPath: 'a/c.jpg' })).not.toBe(key)
   })
+
+  it('yields a distinct key per size tier for one source (no cross-tier collisions)', () => {
+    const source = {
+      root: 'fuji',
+      relPath: '2025-04-14_14-20-54_DSCF0430.JPG',
+      mtimeMs: 1_700_000_000_000,
+      fileSize: 12_345_678,
+    } as const
+    const sizes = ['thumb', 'small', 'med', 'full'] as const
+    const keys = sizes.map((size) => renditionCacheKey({ ...source, size }))
+    expect(new Set(keys).size).toBe(sizes.length)
+  })
 })
 
 describe('renditionCachePath / renditionExt', () => {
-  it('places thumb/med under webp and full under jpg, inside DATA_DIR/renditions', () => {
+  it('places thumb/small/med under webp and full under jpg, inside DATA_DIR/renditions', () => {
     const key = 'deadbeef'
     expect(renditionExt('thumb')).toBe('webp')
+    expect(renditionExt('small')).toBe('webp')
     expect(renditionExt('med')).toBe('webp')
     expect(renditionExt('full')).toBe('jpg')
     expect(renditionCachePath(key, 'thumb')).toBe(join(dataDir, 'renditions', `${key}.webp`))
+    expect(renditionCachePath(key, 'small')).toBe(join(dataDir, 'renditions', `${key}.webp`))
     expect(renditionCachePath(key, 'full')).toBe(join(dataDir, 'renditions', `${key}.jpg`))
   })
 })

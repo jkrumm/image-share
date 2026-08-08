@@ -7,9 +7,9 @@ import { env } from '../env.js'
 // re-edited file (new mtime/size) misses and regenerates. Cache files live
 // under DATA_DIR/renditions and use their own mtime as an LRU clock.
 
-export type RenditionSize = 'thumb' | 'med' | 'full'
+export type RenditionSize = 'thumb' | 'small' | 'med' | 'full'
 
-/** File extension a size renders to: webp for thumb/med, jpg for full (§6). */
+/** File extension a size renders to: webp for thumb/small/med, jpg for full (§6). */
 export function renditionExt(size: RenditionSize): 'webp' | 'jpg' {
   return size === 'full' ? 'jpg' : 'webp'
 }
