@@ -61,6 +61,17 @@ export function baseCss(): string {
   return `${GEOMETRY}
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
+/* The UA stylesheet's \`[hidden] { display: none }\` sits at specificity
+   (0,1,0) — tied with any single-class author rule (\`.switcher-menu { display:
+   flex }\`) and beaten outright by a two-class one (\`.actions .text-btn {
+   display: inline-flex }\`). A tie goes to whichever rule is LATER in the
+   cascade, which is always the author stylesheet, so \`hidden\` silently
+   stopped hiding \`#switcherBtn\`/\`#switcherMenu\` the moment they picked up a
+   display-setting class — confirmed live: both rendered visibly with
+   \`hidden=true\` still on the element. \`!important\` here is deliberate and
+   global, not a one-off: it is the only way to guarantee \`hidden\` always wins
+   regardless of what display rule a future element's class happens to carry. */
+[hidden] { display: none !important; }
 body {
   background: var(--bg);
   color: var(--fg);

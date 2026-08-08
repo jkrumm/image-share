@@ -171,7 +171,13 @@ interface PendingFetch {
   reject: () => void
 }
 
-function mountShare(opts: { tiles: number; total: number; hasMore?: boolean }) {
+function mountShare(opts: {
+  tiles: number
+  total: number
+  hasMore?: boolean
+  /** Seeds `localStorage['image-share.shares']` for the switcher tests. */
+  remembered?: Array<{ slug: string; token: string; title: string; count: number }>
+}) {
   const tiles: FakeEl[] = []
   function makeTile(index: number): FakeEl {
     const tile = new FakeEl()
@@ -207,6 +213,13 @@ function mountShare(opts: { tiles: number; total: number; hasMore?: boolean }) {
   const lbimg = new FakeEl()
   const lberror = new FakeEl()
   lberror.hidden = true
+  // Server-rendered default is `hidden` on both — mainScript's renderSwitcher()
+  // is the only thing allowed to flip it (see the client.test.ts switcher tests).
+  const switcherBtn = new FakeEl()
+  switcherBtn.hidden = true
+  const switcherMenu = new FakeEl()
+  switcherMenu.hidden = true
+  const rawSize = new FakeEl()
   const byId: Record<string, FakeEl | null> = {
     gallery,
     more: opts.hasMore === false ? null : moreBox,
@@ -223,10 +236,11 @@ function mountShare(opts: { tiles: number; total: number; hasMore?: boolean }) {
     lbdl: new FakeEl(),
     lbdlsize: new FakeEl(),
     lbraw: new FakeEl(),
+    lbrawsize: rawSize,
     meta: new FakeEl(),
     zipBtn: null,
-    switcherBtn: null,
-    switcherMenu: null,
+    switcherBtn,
+    switcherMenu,
   }
 
   const docHandlers: Record<string, Handler[]> = {}
@@ -302,7 +316,9 @@ function mountShare(opts: { tiles: number; total: number; hasMore?: boolean }) {
   run(
     win,
     document,
-    fakeStorage(),
+    fakeStorage(
+      opts.remembered ? { 'image-share.shares': JSON.stringify(opts.remembered) } : undefined,
+    ),
     fetchStub,
     FakeIntersectionObserver,
     FakeImage,
@@ -324,6 +340,9 @@ function mountShare(opts: { tiles: number; total: number; hasMore?: boolean }) {
     lberror,
     moreBox,
     moreError,
+    switcherBtn,
+    switcherMenu,
+    rawSize,
     images: createdImages,
     /** Simulate the NEXT `new Image()` staying in flight (not yet decoded). */
     queueImageComplete(value: boolean): void {
@@ -470,6 +489,50 @@ describe('mainScript — progressive reveal + lightbox', () => {
     dom.win.visualViewport = { scale: 1 }
     dom.swipe(-120)
     expect(dom.counter.textContent).toBe('3 / 5')
+  })
+
+  it('the lightbox RAW control shows the RAF size next to its cannot-open hint', () => {
+    const dom = mountShare({ tiles: 5, total: 5, hasMore: false })
+    dom.tiles[1]!.dataset['raw'] = '1'
+    dom.tiles[1]!.dataset['rawSize'] = '42000000'
+    dom.openTile(1)
+    expect(dom.rawSize.textContent).toBe('42 MB')
+  })
+
+  it('leaves the RAW size slot empty when the tile has no paired RAF', () => {
+    const dom = mountShare({ tiles: 5, total: 5, hasMore: false })
+    dom.openTile(1) // fixture tiles default to raw: '0'
+    expect(dom.rawSize.textContent).toBe('')
+  })
+})
+
+// Regression: `renderSwitcher()` itself always got the hidden/shown decision
+// right — the live bug was CSS (`.switcher-menu`/`.text-btn` display rules
+// beating the UA `[hidden]` rule, see styles.ts and page.test.ts). Covered
+// here anyway so the JS side of the contract has its own explicit test and
+// can't silently regress alongside a future CSS change.
+describe('renderSwitcher — hidden/shown decision', () => {
+  it('stays hidden when the only remembered share IS the current one', () => {
+    const dom = mountShare({
+      tiles: 1,
+      total: 1,
+      hasMore: false,
+      remembered: [{ slug: 's', token: 't', title: 'T', count: 3 }],
+    })
+    expect(dom.switcherBtn.hidden).toBe(true)
+    expect(dom.switcherMenu.hidden).toBe(true)
+  })
+
+  it('reveals the button (menu stays collapsed until clicked) once another share is remembered', () => {
+    const dom = mountShare({
+      tiles: 1,
+      total: 1,
+      hasMore: false,
+      remembered: [{ slug: 'segeln-25', token: 't2', title: 'Segeln 25', count: 84 }],
+    })
+    expect(dom.switcherBtn.hidden).toBe(false)
+    expect(dom.switcherMenu.hidden).toBe(true)
+    expect(dom.switcherMenu.innerHTML).toContain('Segeln 25')
   })
 })
 

@@ -517,6 +517,65 @@ describe('listShareImages + getShareImageById (selection source)', () => {
   })
 })
 
+describe('listShareImages — rawFileSize', () => {
+  // The lightbox's RAW download control needs the RAF's byte size (design
+  // §7/§8 follow-up: it used to show only the "can't open on a phone" hint,
+  // never the size, even though a RAF is 30-60 MB — the one download where
+  // the size matters most). The paired RAF is its own indexed `images` row
+  // (root='raws'), so this is a join against an already-indexed column, never
+  // a filesystem stat on the page-render path.
+  it('joins the paired RAF row by (root, rel_path) and surfaces its indexed fileSize', async () => {
+    const id = await seedShare({ slug: 'raw-size', dir: 'raw-size' })
+    await seedToken(id, 'rs', { role: 'full' })
+    const jpeg = await seedImage({
+      root: 'fuji',
+      relPath: 'raw-size/a.jpg',
+      dir: 'raw-size',
+      rawPath: 'raw-size/a.RAF',
+    })
+    await seedImage({
+      root: 'raws',
+      relPath: 'raw-size/a.RAF',
+      dir: 'raw-size',
+      stem: 'a',
+      ext: 'raf',
+      kind: 'raw',
+      fileSize: 42_000_000,
+    })
+
+    const access = await resolveShareAccess({ slug: 'raw-size', token: 'rs' })
+    const list = await listShareImages(access!.share)
+    expect(list).toHaveLength(1)
+    expect(list[0]!.id).toBe(jpeg)
+    expect(list[0]!.rawFileSize).toBe(42_000_000)
+  })
+
+  it('is null when the image has no paired RAF', async () => {
+    const id = await seedShare({ slug: 'no-raw', dir: 'no-raw' })
+    await seedToken(id, 'nr')
+    await seedImage({ root: 'fuji', relPath: 'no-raw/a.jpg', dir: 'no-raw' })
+
+    const access = await resolveShareAccess({ slug: 'no-raw', token: 'nr' })
+    const list = await listShareImages(access!.share)
+    expect(list[0]!.rawFileSize).toBeNull()
+  })
+
+  it('is null when raw_path names a row the RAWS_ROOT scan never indexed (dangling pointer)', async () => {
+    const id = await seedShare({ slug: 'dangling-raw', dir: 'dangling-raw' })
+    await seedToken(id, 'dr')
+    await seedImage({
+      root: 'fuji',
+      relPath: 'dangling-raw/a.jpg',
+      dir: 'dangling-raw',
+      rawPath: 'dangling-raw/missing.RAF',
+    })
+
+    const access = await resolveShareAccess({ slug: 'dangling-raw', token: 'dr' })
+    const list = await listShareImages(access!.share)
+    expect(list[0]!.rawFileSize).toBeNull()
+  })
+})
+
 // ── The order a friend actually scrolls ──────────────────────────────────────
 //
 // The Library grid defaults to captureAt/DESC, and a selection share used to

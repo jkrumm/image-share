@@ -13,6 +13,7 @@ import {
   sum,
   type SQL,
 } from 'drizzle-orm'
+import { alias } from 'drizzle-orm/sqlite-core'
 import { db as defaultDb, type Db } from '../db/index.js'
 import { albumAtOrBelow } from './album-scope.js'
 import { dirAtOrBelow } from './dir-scope.js'
@@ -47,6 +48,17 @@ export function setShareDb(database: Db): void {
 }
 
 // ── Share content query ──────────────────────────────────────────────────────
+
+// Self-join alias: a JPEG row's `raw_path` names the paired RAF's `rel_path`
+// under `root='raws'`, and the scanner already stamps `file_size` on every
+// scanned file regardless of kind (indexer/scan.ts) — so the RAF's own row
+// already carries its byte size, indexed, no stat() needed. Used to surface
+// it on the lightbox's RAW download control without a filesystem call on the
+// page-render hot path.
+const rawImages = alias(images, 'raw_images')
+
+/** An `images` row plus its paired RAF's indexed byte size, if any (see `rawImages` above). */
+export type ShareListImage = ImageRow & { rawFileSize: number | null }
 
 /**
  * "This image carries a keyword at or below `album`" as a correlated EXISTS
@@ -170,27 +182,31 @@ export interface ShareImageWindow {
  * rows sharing a capture timestamp could swap between page 1 and page 2 and be
  * shown twice or never.
  */
+const rawSizeJoin = and(eq(rawImages.root, 'raws'), eq(rawImages.relPath, images.rawPath))
+
 export async function listShareImages(
   share: ShareRow,
   window: ShareImageWindow = {},
-): Promise<ImageRow[]> {
+): Promise<ShareListImage[]> {
   const base =
     share.sourceType === 'selection'
       ? activeDb
-          .select({ image: images })
+          .select({ image: images, rawFileSize: rawImages.fileSize })
           .from(shareImages)
           .innerJoin(images, eq(images.id, shareImages.imageId))
+          .leftJoin(rawImages, rawSizeJoin)
           .where(selectionFilter(share))
           .orderBy(asc(images.captureAt), asc(images.id))
       : activeDb
-          .select({ image: images })
+          .select({ image: images, rawFileSize: rawImages.fileSize })
           .from(images)
+          .leftJoin(rawImages, rawSizeJoin)
           .where(shareImageFilter(share))
           .orderBy(asc(images.captureAt), asc(images.id))
   const rows = await (window.limit === undefined
     ? base
     : base.limit(window.limit).offset(window.offset ?? 0))
-  return rows.map((r) => r.image)
+  return rows.map((r) => ({ ...r.image, rawFileSize: r.rawFileSize ?? null }))
 }
 
 /** Aggregate facts about a share's images — one query, no row enumeration. */

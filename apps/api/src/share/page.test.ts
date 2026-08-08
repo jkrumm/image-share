@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'bun:test'
-import type { ImageRow, ShareRow } from '../db/schema.js'
+import type { ShareRow } from '../db/schema.js'
+import type { ShareListImage } from '../lib/share-auth.js'
 import { LOCALES, formatBytes } from './page/i18n.js'
-import { controlsCss } from './page/styles.js'
+import { baseCss, controlsCss } from './page/styles.js'
 import {
   render404Page,
   renderLandingPage,
@@ -30,7 +31,7 @@ function makeShare(overrides: Partial<ShareRow> = {}): ShareRow {
   }
 }
 
-function makeImage(overrides: Partial<ImageRow> = {}): ImageRow {
+function makeImage(overrides: Partial<ShareListImage> = {}): ShareListImage {
   return {
     id: 10,
     root: 'fuji',
@@ -47,6 +48,7 @@ function makeImage(overrides: Partial<ImageRow> = {}): ImageRow {
     width: 4000,
     height: 3000,
     rawPath: null,
+    rawFileSize: null,
     indexedAt: '2026-06-02T00:00:00.000Z',
     keywordsIndexedAt: '2026-06-02T00:00:00.000Z',
     ...overrides,
@@ -141,6 +143,30 @@ describe('renderSharePage', () => {
       pageInput({ images: [makeImage({ rawPath: 'DSCF0001.RAF' })], role: 'full' }),
     )
     expect(html).toContain('id="lbraw"')
+  })
+
+  it('the RAW control ships a size slot alongside its cannot-open hint, and the tile carries the indexed RAF size', () => {
+    // Regression: the RAW control used to show ONLY the hint, never the size —
+    // backwards from the JPEG control, and backwards from what actually matters:
+    // a .RAF is 30-60 MB, far bigger than the JPEG, so its size is the one a
+    // visitor on a cellular plan needs most.
+    const html = renderSharePage(
+      pageInput({
+        images: [makeImage({ rawPath: 'DSCF0001.RAF', rawFileSize: 42_000_000 })],
+        role: 'full',
+      }),
+    )
+    expect(html).toContain('data-raw-size="42000000"')
+    expect(html).toMatch(
+      /id="lbraw"[^>]*>.*?<span[^>]*id="lbrawsize"><\/span>.*?data-i18n="lightboxRawHint"/s,
+    )
+  })
+
+  it('leaves data-raw-size empty when the image has no paired RAF', () => {
+    const html = renderSharePage(
+      pageInput({ images: [makeImage({ rawPath: null })], role: 'full' }),
+    )
+    expect(html).toContain('data-raw-size=""')
   })
 
   it('HTML-escapes malicious filenames in both attribute and JSON contexts', () => {
@@ -326,6 +352,16 @@ describe('renderSharePage', () => {
     expect(renderSharePage(pageInput())).toContain("t('switcherHeading')")
   })
 
+  it('the switcher button and menu ship with the hidden attribute', () => {
+    // Markup-only guard for the display-vs-[hidden] regression below: the
+    // switcher must render `hidden` server-side regardless of how many shares
+    // a visitor has remembered — mainScript decides at runtime whether to
+    // reveal it, and CSS must never override that decision (see baseCss()).
+    const html = renderSharePage(pageInput())
+    expect(html).toMatch(/id="switcherBtn"[^>]* hidden[^>]*>/)
+    expect(html).toMatch(/id="switcherMenu"[^>]* hidden[^>]*>/)
+  })
+
   it('bento: a full-width tile carries its two-column row span, and rows follow the width', () => {
     // The library is 3:2 and the phone grid is two columns wide, so a landscape
     // tile IS the content width: with a fixed row height it was a ~2.5:1 strip
@@ -508,6 +544,25 @@ describe('render404Page', () => {
     expect(html).toContain('document.documentElement.lang')
     // Still deterministic per (locale, denial cause) — the opaque-404 contract.
     expect(html).toBe(render404Page('de'))
+  })
+})
+
+describe('[hidden] vs display-setting classes', () => {
+  // Regression: `.switcher-menu { display: flex }` (and `.actions .text-btn {
+  // display: inline-flex }`) beat the UA `[hidden] { display: none }` rule at
+  // equal-or-higher specificity, so #switcherBtn/#switcherMenu rendered
+  // VISIBLY on screen even with `hidden` still on the element (confirmed live:
+  // getComputedStyle().display === 'flex' with hidden === true). A global,
+  // `!important` `[hidden]` rule is the fix — verify it ships, ahead of
+  // whatever display-setting class an element also carries.
+  it('baseCss() carries a global !important [hidden] guard', () => {
+    expect(baseCss()).toMatch(/\[hidden\]\s*\{\s*display:\s*none\s*!important\s*;?\s*\}/)
+  })
+
+  it('the guard is present on every page baseCss() ships on (share, landing, 404)', () => {
+    for (const html of [renderSharePage(pageInput()), renderLandingPage(), render404Page()]) {
+      expect(html).toMatch(/\[hidden\]\s*\{\s*display:\s*none\s*!important/)
+    }
   })
 })
 

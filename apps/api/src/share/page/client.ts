@@ -413,6 +413,7 @@ export function mainScript(cfgJson: string, catalogueJson: string): string {
   var dl = document.getElementById('lbdl');
   var dlSize = document.getElementById('lbdlsize');
   var raw = document.getElementById('lbraw');
+  var rawSize = document.getElementById('lbrawsize');
   var closeBtn = lb ? lb.querySelector('.lb-close') : null;
   var idx = 0;
   var pendingUrl = null;
@@ -457,7 +458,10 @@ export function mainScript(cfgJson: string, catalogueJson: string): string {
     if (raw) {
       var hasRaw = el.dataset.raw === '1';
       raw.hidden = !hasRaw;
-      if (hasRaw) raw.href = fileBase + '&raw=1';
+      if (hasRaw) {
+        raw.href = fileBase + '&raw=1';
+        if (rawSize) rawSize.textContent = el.dataset.rawSize ? formatBytes(Number(el.dataset.rawSize)) : '';
+      }
     }
 
     // Keep the CURRENT frame on screen until the next one has decoded — a cold

@@ -1,6 +1,6 @@
 import { basename } from 'node:path'
 import type { ImageRow, ShareRow } from '../../db/schema.js'
-import type { ShareTokenRole } from '../../lib/share-auth.js'
+import type { ShareListImage, ShareTokenRole } from '../../lib/share-auth.js'
 import { renditionDimension } from '../../renditions/render.js'
 import { bentoSpanFor, narrowRowSpan } from './layout.js'
 import {
@@ -47,7 +47,7 @@ export interface SharePageSummary {
 export interface SharePageInput {
   share: ShareRow
   /** The window of images to render as tiles (see `SHARE_PAGE_SIZE`). */
-  images: ImageRow[]
+  images: ShareListImage[]
   /** Global index of `images[0]` within the share. */
   from: number
   summary: SharePageSummary
@@ -221,7 +221,7 @@ function renderedWidth(image: ImageRow, target: number): number {
  * `mainScript` intercepts an unmodified left click and opens the lightbox
  * instead, so the plain-href path is a fallback, not the primary UX.
  */
-function tileHtml(image: ImageRow, index: number, ctx: TileContext): string {
+function tileHtml(image: ShareListImage, index: number, ctx: TileContext): string {
   const { slugU, auth } = ctx
   const name = displayName(image)
   const base = `/s/${slugU}/img/${image.id}`
@@ -264,7 +264,12 @@ function tileHtml(image: ImageRow, index: number, ctx: TileContext): string {
       }).format(new Date(day))
     : ''
   const alt = dayLabel ? `${dayLabel} — ${position}` : position
-  return `<figure class="tile tile-ph" data-i="${index}" data-id="${image.id}" data-name="${escapeHtml(name)}" data-date="${escapeHtml(day)}" data-size="${image.fileSize}" data-raw="${image.rawPath ? 1 : 0}" style="--ratio:${ratio};--col-span:${span.colSpan};--row-span:${span.rowSpan};--row-span-narrow:${narrowRowSpan(span)}">
+  // `data-raw-size` mirrors `data-size` (the JPEG's own indexed `fileSize`):
+  // the paired RAF is its own `images` row (root='raws'), so its byte size is
+  // already indexed too (`listShareImages`'s `rawFileSize` join) — no stat()
+  // on the page-render hot path. Empty when there is no paired RAF at all.
+  const rawSizeAttr = image.rawPath && image.rawFileSize !== null ? image.rawFileSize : ''
+  return `<figure class="tile tile-ph" data-i="${index}" data-id="${image.id}" data-name="${escapeHtml(name)}" data-date="${escapeHtml(day)}" data-size="${image.fileSize}" data-raw="${image.rawPath ? 1 : 0}" data-raw-size="${rawSizeAttr}" style="--ratio:${ratio};--col-span:${span.colSpan};--row-span:${span.rowSpan};--row-span-narrow:${narrowRowSpan(span)}">
     <a class="tile-btn" href="${escapeHtml(link)}">
       <img class="tile-img" ${loadingAttrs}${dims}
         src="${escapeHtml(thumb)}"
@@ -430,7 +435,7 @@ ${controlsHtml(m, locale)}
         <span class="lb-date" id="lbdate"></span>
       </span>
       ${canDownload ? `<a class="text-btn" id="lbdl" download><span data-i18n="lightboxDownload">${escapeHtml(m.lightboxDownload)}</span><span class="lb-size" id="lbdlsize"></span></a>` : ''}
-      ${canRaw ? `<a class="text-btn" id="lbraw" download hidden><span data-i18n="lightboxDownloadRaw">${escapeHtml(m.lightboxDownloadRaw)}</span><span class="lb-hint" data-i18n="lightboxRawHint">${escapeHtml(m.lightboxRawHint)}</span></a>` : ''}
+      ${canRaw ? `<a class="text-btn" id="lbraw" download hidden><span data-i18n="lightboxDownloadRaw">${escapeHtml(m.lightboxDownloadRaw)}</span><span class="lb-size" id="lbrawsize"></span><span class="lb-hint" data-i18n="lightboxRawHint">${escapeHtml(m.lightboxRawHint)}</span></a>` : ''}
     </div>
   </div>
 </dialog>
