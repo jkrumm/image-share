@@ -3,16 +3,28 @@ import { Elysia } from 'elysia'
 import { z } from 'zod'
 import { and, desc, eq, isNull } from 'drizzle-orm'
 import { db } from '../db/index.js'
-import { shares, shareTokens, type ShareRow, type ShareTokenRow } from '../db/schema.js'
+import {
+  ALBUM_SHARE_LEGACY_DIR,
+  shares,
+  shareTokens,
+  type ShareRow,
+  type ShareTokenRow,
+} from '../db/schema.js'
 import { env } from '../env.js'
-import { listShareImages, shareImageCount, setShareImages } from '../lib/share-auth.js'
+import {
+  checkShareImageIds,
+  listShareImages,
+  shareImageCount,
+  setShareImages,
+} from '../lib/share-auth.js'
 import { ImageDto, toImageDto } from './library.js'
 
-// Share management (design §8, role-based rework). A share is either a
-// `folder` (root+dir, live-filtered from the index) or a `selection`
-// (explicit ordered image ids in share_images). Each token carries a role
-// (view|download|full) governing which asset routes it can reach — see
-// share/routes.ts for the enforcement.
+// Share management (design §8, role-based rework). A share is a `folder`
+// (root+dir, live-filtered from the index), an `album` (a Lightroom keyword
+// path in image_keywords, also live-filtered — the axis the flat Fuji tree is
+// actually organized along), or a `selection` (explicit ordered image ids in
+// share_images). Each token carries a role (view|download|full) governing
+// which asset routes it can reach — see share/routes.ts for the enforcement.
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
 
@@ -43,6 +55,37 @@ const ExpiresAtSchema = z
   .optional()
 
 const TokenRoleEnum = z.enum(['view', 'download', 'full'])
+
+/** At most 10 ids, so a 3661-id mistake stays a readable error message. */
+function summariseIds(ids: number[]): string {
+  return ids.length > 10
+    ? `${ids.slice(0, 10).join(', ')}, … (${ids.length} total)`
+    : ids.join(', ')
+}
+
+/**
+ * Why a selection share's `imageIds` are refused, or null when they are fine.
+ *
+ * REJECT, never silently filter: a share is a promise about a specific set of
+ * photos, and quietly shipping a smaller one than was asked for is the same
+ * class of bug as quietly shipping a larger one (see the folder/album share
+ * button, design §12). The admin never sends a non-renderable id — the Library
+ * page blocks it before the modal opens — so a 400 here is a client or agent
+ * bug, and it says exactly which ids caused it.
+ */
+async function imageIdsRejection(imageIds: number[]): Promise<string | null> {
+  const { missing, unrenderable } = await checkShareImageIds(imageIds)
+  const problems: string[] = []
+  if (unrenderable.length > 0) {
+    problems.push(
+      `${unrenderable.length} cannot be rendered (RAW originals have no rendition): ${summariseIds(unrenderable)}`,
+    )
+  }
+  if (missing.length > 0) {
+    problems.push(`${missing.length} do not exist: ${summariseIds(missing)}`)
+  }
+  return problems.length > 0 ? `imageIds rejected — ${problems.join('; ')}` : null
+}
 
 function generateToken(): string {
   return randomBytes(24).toString('base64url')
@@ -113,10 +156,23 @@ const ShareDto = z.object({
   id: z.number().int(),
   slug: z.string(),
   title: z.string(),
-  sourceType: z.enum(['folder', 'selection']),
-  root: ShareRootEnum.nullable(),
-  dir: z.string().nullable(),
-  recursive: z.boolean().describe('Folder shares: include images in sub-directories of `dir`'),
+  sourceType: z.enum(['folder', 'selection', 'album']),
+  root: ShareRootEnum.nullable().describe(
+    'Folder and album shares: the root the share resolves against (null on a selection share)',
+  ),
+  dir: z
+    .string()
+    .nullable()
+    .describe('Folder shares: the directory the share resolves against (null on any other source)'),
+  album: z
+    .string()
+    .nullable()
+    .describe('Album shares: the hierarchical keyword path, e.g. `Ereignisse|Segeln 25`'),
+  recursive: z
+    .boolean()
+    .describe(
+      'Folder shares: include images in sub-directories of `dir`. Album shares: include sub-albums below `album`.',
+    ),
   minRating: z.number().int().nullable(),
   expiresAt: z.string().nullable(),
   note: z.string().nullable(),
@@ -135,7 +191,11 @@ async function toShareDto(
     title: row.title,
     sourceType: row.sourceType as z.infer<typeof ShareDto>['sourceType'],
     root: row.root as z.infer<typeof ShareDto>['root'],
-    dir: row.dir,
+    // `dir` is a FOLDER-share property. An album row's column holds the
+    // rollback poison pill (ALBUM_SHARE_LEGACY_DIR), which is storage detail —
+    // the API contract stays "null unless this is a folder share".
+    dir: row.sourceType === 'folder' ? row.dir : null,
+    album: row.album,
     recursive: row.recursive,
     minRating: row.minRating,
     expiresAt: row.expiresAt,
@@ -158,23 +218,59 @@ const FolderSource = z.object({
     .boolean()
     .optional()
     .describe(
-      'Include sub-directories of `dir` (default true). False scopes the share to `dir` itself; with an empty `dir` that means the root’s immediate children only.',
+      'Include sub-directories of `dir` (default true — the same default GET /api/library/images applies, so a preview run with the same root/dir/minRating and `kind=jpeg` returns this share’s exact image count). False scopes the share to `dir` itself; with an empty `dir` that means the root’s immediate children only.',
     ),
   minRating: z.number().int().min(0).max(5).nullable().optional(),
 })
 
+// A selection share names its images explicitly. Every id must exist and be
+// renderable (`kind='jpeg'`) — a `.RAF` has no rendition (design §6), so it
+// would 500 every tile on the friend's page; unknown/RAW ids are a 400 listing
+// them, never a silent drop. The array's order is NOT the share's order: every
+// share ships capture-ascending (design §7).
 const SelectionSource = z.object({
   type: z.literal('selection'),
-  imageIds: z.array(z.number().int()).min(1),
+  imageIds: z
+    .array(z.number().int())
+    .min(1)
+    .describe(
+      'Existing, renderable (`kind=jpeg`) image ids. RAW ids or unknown ids are rejected with 400. Order is irrelevant — the share ships capture_at-ascending.',
+    ),
 })
 
-const ShareSource = z.discriminatedUnion('type', [FolderSource, SelectionSource])
+// Album shares scope on `image_keywords.path` — the Lightroom hierarchy already
+// written into the JPEGs — not on the filesystem tree. The path is required and
+// non-empty: an empty album would mean "every tagged image", which is a
+// different (unrequested) kind of share and a foot-gun on a public surface.
+// `root` is part of the scope (default 'fuji'), exactly as it is for a folder
+// share: SHARE_ROOT is agent-writable, so a cross-root album would auto-publish
+// any ingested file carrying a matching keyword (see lib/share-auth.ts).
+const AlbumSource = z.object({
+  type: z.literal('album'),
+  root: ShareRootEnum.optional().describe(
+    'Root the album is resolved against (default `fuji`) — matches the `root` of the GET /library/albums tree the path came from',
+  ),
+  album: z
+    .string()
+    .min(1)
+    .describe('Full hierarchical keyword path, e.g. `Ereignisse|Segeln 25` (`|` separates levels)'),
+  recursive: z
+    .boolean()
+    .optional()
+    .describe(
+      'Include sub-albums below `album` (default true — the same default GET /api/library/images applies, so the node’s recursive `imageCount` from GET /api/library/albums is this share’s exact image count). False scopes to that album exactly.',
+    ),
+  minRating: z.number().int().min(0).max(5).nullable().optional(),
+})
+
+const ShareSource = z.discriminatedUnion('type', [FolderSource, SelectionSource, AlbumSource])
 
 const CreateShareBody = z.object({
   slug: z.string().regex(SLUG_RE).optional().describe('Auto-derived from title when omitted'),
   title: z.string().min(1),
   note: z.string().nullable().optional(),
   expiresAt: ExpiresAtSchema.describe('ISO 8601 expiry (date or datetime), null for none'),
+  role: TokenRoleEnum.optional().describe('Role of the initial minted token (default `view`)'),
   source: ShareSource,
 })
 
@@ -182,15 +278,29 @@ const UpdateShareBody = z.object({
   title: z.string().min(1).optional(),
   note: z.string().nullable().optional(),
   expiresAt: ExpiresAtSchema,
-  minRating: z.number().int().min(0).max(5).nullable().optional(),
+  minRating: z
+    .number()
+    .int()
+    .min(0)
+    .max(5)
+    .nullable()
+    .optional()
+    .describe('Live-filter threshold (0/null = no filter) — folder and album shares only'),
   recursive: z
     .boolean()
     .optional()
-    .describe('Include sub-directories of `dir` — folder shares only'),
+    .describe('Include sub-directories of `dir` / sub-albums of `album` — not selection shares'),
+  album: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('Re-target the hierarchical keyword path — album shares only'),
   imageIds: z
     .array(z.number().int())
     .optional()
-    .describe('Replaces the image set (position = array order) — selection shares only'),
+    .describe(
+      'Replaces the image set — selection shares only. Same vetting as create: unknown or RAW ids are a 400. Order is irrelevant (the share ships capture_at-ascending).',
+    ),
 })
 
 const CreateTokenBody = z.object({
@@ -220,7 +330,7 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
         tags: ['Shares'],
         summary: 'List shares with tokens, image counts, and minted URLs',
         description:
-          'Returns every share (folder or selection) with its (active + revoked) tokens, each token’s role, and the minted SHARE_BASE_URL/<slug>?token=… links.',
+          'Returns every share (folder, album, or selection) with its (active + revoked) tokens, each token’s role, and the minted SHARE_BASE_URL/<slug>?token=… links.',
         security: [{ BearerAuth: [] }],
       },
     },
@@ -243,7 +353,7 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
         tags: ['Shares'],
         summary: 'Get a single share with tokens and its resolved image set',
         description:
-          'Same shape as the list endpoint plus `images`: a folder share’s live-filtered, capture_at-ascending image list, or a selection share’s share_images in position order. Powers the admin share detail page.',
+          'Same shape as the list endpoint plus `images`: the share’s resolved set, capture_at-ascending for every source type (a folder/album share live-filtered from the index, a selection share joined through share_images) — the exact order the public page and the ZIP use. Powers the admin share detail page.',
         security: [{ BearerAuth: [] }],
       },
     },
@@ -262,16 +372,44 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
       const now = new Date().toISOString()
       const source = body.source
 
+      // Vetted BEFORE the share row exists, so a rejected set cannot leave a
+      // half-built share (and a live token) behind.
+      if (source.type === 'selection') {
+        const rejection = await imageIdsRejection(source.imageIds)
+        if (rejection) return status(400, rejection)
+      }
+
       const [share] = await db
         .insert(shares)
         .values({
           slug,
           title: body.title,
           sourceType: source.type,
-          root: source.type === 'folder' ? source.root : null,
-          dir: source.type === 'folder' ? source.dir : null,
-          recursive: source.type === 'folder' ? (source.recursive ?? true) : true,
-          minRating: source.type === 'folder' ? (source.minRating ?? null) : null,
+          root:
+            source.type === 'folder'
+              ? source.root
+              : source.type === 'album'
+                ? (source.root ?? 'fuji')
+                : null,
+          // An album share stores the rollback poison pill rather than NULL: a
+          // binary predating album shares reads a NULL `dir` on a non-folder row
+          // as "the whole root" and would widen a live friend link to the entire
+          // library (see ALBUM_SHARE_LEGACY_DIR). Never read, never returned.
+          dir:
+            source.type === 'folder'
+              ? source.dir
+              : source.type === 'album'
+                ? ALBUM_SHARE_LEGACY_DIR
+                : null,
+          album: source.type === 'album' ? source.album : null,
+          // `?? true` is the canonical default for BOTH scope axes, and GET
+          // /api/library/images resolves an unspecified `recursive` the same
+          // way — that route is the count preview, so the two defaults must
+          // agree or the operator approves one number and ships another (an
+          // interior album node like 'Ereignisse' has all of its images below
+          // it, so the divergence is the whole subtree, not an edge case).
+          recursive: source.type === 'selection' ? true : (source.recursive ?? true),
+          minRating: source.type === 'selection' ? null : (source.minRating ?? null),
           expiresAt: body.expiresAt ?? null,
           note: body.note ?? null,
           createdAt: now,
@@ -286,7 +424,7 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
       const token = generateToken()
       const [tokenRow] = await db
         .insert(shareTokens)
-        .values({ shareId: share.id, token, role: 'view', createdAt: now })
+        .values({ shareId: share.id, token, role: body.role ?? 'view', createdAt: now })
         .returning()
       if (!tokenRow) throw new Error('failed to create share token')
 
@@ -300,7 +438,7 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
         tags: ['Shares'],
         summary: 'Create a share',
         description:
-          'Creates a folder share (root+dir, optionally non-recursive and minRating-filtered) or a selection share (explicit ordered image ids), and mints the first token with role=view. `slug` auto-derives from `title` (with `-2`/`-3`… on collision) when omitted.',
+          'Creates a folder share (root+dir), an album share (root + an `image_keywords` hierarchical path, root defaulting to `fuji`) — both recursive unless `recursive:false` is sent, and optionally minRating-filtered — or a selection share (explicit image ids; unknown or non-renderable RAW ids are a 400, and the ids’ order does not matter because every share ships capture_at-ascending), and mints the first token with `role` (default `view`). Preview a folder/album source first with GET /api/library/images (same root + dir/album + minRating, `kind=jpeg`): it shares this route’s `recursive` default, so its `total` is the share’s resulting `imageCount`. `slug` auto-derives from `title` (with `-2`/`-3`… on collision) when omitted.',
         security: [{ BearerAuth: [] }],
       },
     },
@@ -311,17 +449,32 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
       const [existing] = await db.select().from(shares).where(eq(shares.id, params.id)).limit(1)
       if (!existing) return status(404, 'Share not found')
 
+      // Each scope field is rejected on the source types where it is
+      // meaningless, rather than silently stored: a `min_rating` on a selection
+      // share or a `recursive` on one would read as an active filter in the
+      // admin UI while the share predicate ignores it entirely.
       if (body.imageIds !== undefined && existing.sourceType !== 'selection') {
         return status(400, 'imageIds can only be set on a selection share')
       }
-      if (body.recursive !== undefined && existing.sourceType !== 'folder') {
-        return status(400, 'recursive can only be set on a folder share')
+      if (body.album !== undefined && existing.sourceType !== 'album') {
+        return status(400, 'album can only be set on an album share')
+      }
+      if (body.recursive !== undefined && existing.sourceType === 'selection') {
+        return status(400, 'recursive can only be set on a folder or album share')
+      }
+      if (body.minRating !== undefined && existing.sourceType === 'selection') {
+        return status(400, 'minRating can only be set on a folder or album share')
+      }
+      if (body.imageIds !== undefined) {
+        const rejection = await imageIdsRejection(body.imageIds)
+        if (rejection) return status(400, rejection)
       }
 
       const updates: Partial<typeof shares.$inferInsert> = {}
       if (body.title !== undefined) updates.title = body.title
       if (body.minRating !== undefined) updates.minRating = body.minRating
       if (body.recursive !== undefined) updates.recursive = body.recursive
+      if (body.album !== undefined) updates.album = body.album
       if (body.expiresAt !== undefined) updates.expiresAt = body.expiresAt
       if (body.note !== undefined) updates.note = body.note
 
@@ -345,7 +498,7 @@ export const sharesRoutes = new Elysia({ name: 'shares-admin' })
         tags: ['Shares'],
         summary: 'Update a share',
         description:
-          'Partial update of title/note/expiresAt/minRating/recursive (`recursive` is rejected on a selection share). `imageIds` replaces a selection share’s image set (position = array order) — rejected on a folder share. Does not manage tokens — see POST /shares/:id/tokens, /roll, and /tokens/:tokenId/revoke.',
+          'Partial update of title/note/expiresAt/minRating/recursive/album. `minRating` and `recursive` are rejected on a selection share; `album` only applies to an album share; `imageIds` replaces a selection share’s image set (unknown or non-renderable RAW ids → 400) and is rejected on folder/album shares. Does not manage tokens — see POST /shares/:id/tokens, /roll, and /tokens/:tokenId/revoke.',
         security: [{ BearerAuth: [] }],
       },
     },
