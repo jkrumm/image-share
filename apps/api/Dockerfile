@@ -56,7 +56,18 @@ EXPOSE 7720
 
 USER bun
 
-HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
+# timeout/retries are deliberately loose. Serving a multi-GB archive is a
+# `sendfile(2)` the runtime cannot be interrupted out of cheaply: when a visitor
+# cancels one partway, the loop stalls for as long as it takes to abandon the
+# remainder, and `/health` goes quiet with it. Measured: a 191 MB archive
+# aborted after 1 MB is fine, 3.78 GB aborted after 20 MB stalled past one 5 s
+# probe, 19 GB wedged outright (now refused up front by SHARE_ZIP_MAX_BYTES,
+# design §7). The stall self-recovers — the process is never actually broken —
+# so the old 5s x 3 turned a cancelled download into a container restart.
+# 10s x 5 rides it out. The cost is that a genuinely hung process takes ~50s
+# rather than ~30s to be caught, which is the right trade for a service whose
+# heaviest route is a large file read.
+HEALTHCHECK --interval=10s --timeout=10s --start-period=15s --retries=5 \
   CMD curl -fsS http://localhost:7720/health || exit 1
 
 CMD ["bun", "run", "apps/api/src/index.ts"]
