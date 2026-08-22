@@ -22,7 +22,7 @@ import {
 import { useDebouncedValue } from '@mantine/hooks'
 import { modals } from '@mantine/modals'
 import { useQuery } from '@tanstack/react-query'
-import { PageActions, StatCard } from 'basalt-ui'
+import { PageActions, QueryState, StatCard } from 'basalt-ui'
 import { notifyWarning } from 'basalt-ui/notifications'
 import {
   B2SearchSchema,
@@ -31,7 +31,7 @@ import {
   toB2ListParams,
   type B2SearchParams,
 } from '../features/b2/search-params'
-import { QueryState, notifyMutation } from '../features/common'
+import { notifyMutation } from '../features/common'
 import { formatBytes, formatDateTime, formatNumber } from '../lib/format'
 import {
   b2Queries,

@@ -1,6 +1,5 @@
 import { treaty } from '@elysiajs/eden'
 import type { App } from '@image-share/api'
-import { toErrorMessage as basaltToErrorMessage } from 'basalt-ui/query'
 import { getAssetToken } from './asset-token'
 import { getToken } from './auth'
 
@@ -21,45 +20,15 @@ export const client = treaty<App>(baseUrl, {
 
 // ── Error surfacing ──────────────────────────────────────────────────────────
 //
-// `unwrap` (basalt-ui/query) throws the raw Eden envelope, which is a
-// `{ status, value }` object — printing it directly gives `[object Object]`,
-// which is why every call site historically fell back to a hardcoded string and
-// swallowed the real reason ('slug already in use', 'recursive is rejected on a
-// selection share', a 403 on deleting a fuji image). These two helpers are the
-// only thing a page needs to show what actually happened.
-
-/**
- * The HTTP status behind a thrown Eden envelope, when there is one. Use it to
- * branch (404 → "not found" copy) rather than to build a message — `toErrorMessage`
- * already folds the status into its text when the body carries nothing readable.
- */
-export function errorStatus(err: unknown): number | undefined {
-  if (!err || typeof err !== 'object') return undefined
-  const status = (err as { status?: unknown }).status
-  return typeof status === 'number' ? status : undefined
-}
-
-/**
- * The REAL server message for anything thrown by `unwrap` / a mutation, with a
- * caller-supplied fallback for the cases where the body genuinely says nothing.
- *
- * @example
- * notifyError(toErrorMessage(err, 'Could not create share'))
- */
-export function toErrorMessage(err: unknown, fallback = 'Request failed'): string {
-  if (err === null || err === undefined) return fallback
-  const status = errorStatus(err)
-  const message = basaltToErrorMessage(err).trim()
-  const unusable =
-    message === '' ||
-    message === '{}' ||
-    message === '[]' ||
-    message === 'null' ||
-    message === 'undefined' ||
-    message === '[object Object]'
-  if (unusable) return status === undefined ? fallback : `${fallback} (HTTP ${status})`
-  return message
-}
+// `unwrap` (basalt-ui/query) throws the raw Eden envelope — a `{ status, value }`
+// object that prints as `[object Object]`, which is why call sites historically
+// fell back to a hardcoded string and swallowed the real reason ('slug already in
+// use', a 403 on deleting a fuji image). basalt-ui decodes it: `toErrorMessage`
+// digs out the server's own words, folding the status into the caller's fallback
+// when the body says nothing readable; `errorStatus` exposes the status so a page
+// can branch on it (404 → "not found" copy). Re-exported so a page needs one
+// import for everything Eden-shaped.
+export { errorStatus, toErrorMessage } from 'basalt-ui/query'
 
 // ── Image bytes ──────────────────────────────────────────────────────────────
 

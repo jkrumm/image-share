@@ -1,8 +1,8 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { Button, Group, SimpleGrid, Stack, Text } from '@mantine/core'
 import { useQuery } from '@tanstack/react-query'
-import { StatCard } from 'basalt-ui'
-import { QueryState, notifyMutation } from '../features/common'
+import { QueryState, StatCard } from 'basalt-ui'
+import { notifyMutation } from '../features/common'
 import { formatBytes, formatDateTime, formatNumber, formatRelative } from '../lib/format'
 import { activityQueries, useTriggerRescan, type IndexStatusDto } from '../lib/queries/activity'
 

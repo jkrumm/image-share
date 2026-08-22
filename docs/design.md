@@ -977,8 +977,11 @@ validate a required search shape.
 The basalt enforcement toolchain is installed under `apps/admin` — `.basalt/manifest.json`,
 `.oxlintrc.json` extending the shipped preset (oxlint resolves it as a nested config, so root
 `oxlint .` picks it up), plus the managed `CLAUDE.md`/`DESIGN.md`/`.claude/` seeds. Run
-`bunx basalt-ui check-theme` + `doctor` + `sync --check` from `apps/admin` after any basalt bump.
-Since 1.20.0 those commands relocate to `apps/admin` on their own when run from the repo root, so
+`check-theme` + `doctor` + `sync --check` + `check-theme --audit-allows` + `check-coverage` after
+any basalt bump, through `apps/admin/node_modules/.bin/basalt-ui` — **never `bunx`**, which
+resolves from cache and can report a clean scan from the version you just replaced. Those
+commands relocate to `apps/admin` on their own when run from the repo root (since 1.20.0, and
+since 1.24.0 the relocated run really covers the same 56 files instead of a fabricated `src`), so
 `lefthook.yml` extends the shipped preset (`apps/admin/node_modules/basalt-ui/configs/lefthook.yml`
 — the isolated-linker path, not a root-relative one) instead of hand-writing the gate.
 `index.html` and any `public/` tree are scanned too: head colors come from `basaltAppPlugin`
@@ -987,6 +990,15 @@ hand-written `theme-color` hex. `__APP_VERSION__` is declared by basalt's root b
 block in `src/vite-env.d.ts`. Since 1.21.0 the preset's `oxfmt` glob is source extensions only, so
 the markdown carve-out `lefthook.yml` used to need is gone; `check-theme --audit-allows` proves
 every waiver still suppresses something (this repo has none).
+
+Every page renders its query through basalt's **`QueryState`** (`basalt-ui`, root barrel — it is
+Mantine-rendering, so not `basalt-ui/query`), which owns the loading / error-with-retry / empty /
+children precedence. The local 204-line copy in `features/common/query-state.tsx` is retired as
+of basalt-ui 1.24.0; `lib/eden.ts` re-exports `toErrorMessage` / `errorStatus` from
+`basalt-ui/query`. The branch that matters is error-**without**-data → the real server message,
+not the empty copy: rendering only the empty branch is how a 500 on the library once said
+"No images". `query` is a structural subset checked at RUNTIME, so a hand-composed result
+missing `isError` throws instead of rendering a false claim.
 
 Notifications go through `features/common/notify.ts` → **`notifyMutation`**, never basalt's
 `notifyPromise`: the latter takes a static `error` ReactNode and never sees the rejection, so every

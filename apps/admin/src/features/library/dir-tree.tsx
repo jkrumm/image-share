@@ -1,6 +1,6 @@
 import { NavLink, Skeleton, Stack, Text } from '@mantine/core'
 import { useQuery } from '@tanstack/react-query'
-import { QueryState } from '../common'
+import { QueryState } from 'basalt-ui'
 import { formatNumber } from '../../lib/format'
 import { libraryQueries, type DirDto, type LibraryRoot } from '../../lib/queries/library'
 

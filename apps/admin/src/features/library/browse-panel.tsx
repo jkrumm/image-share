@@ -10,7 +10,7 @@ import {
 } from '@mantine/core'
 import { useDisclosure } from '@mantine/hooks'
 import { useQuery } from '@tanstack/react-query'
-import { QueryState } from '../common'
+import { QueryState } from 'basalt-ui'
 import { libraryQueries, type AlbumNode, type LibraryRoot } from '../../lib/queries/library'
 import { AlbumTree } from './album-tree'
 import { DirTree } from './dir-tree'

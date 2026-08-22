@@ -2,7 +2,7 @@ import { Button, Center, Container, Loader, PasswordInput, Stack, Text, Title } 
 import { field, useBasaltForm } from 'basalt-ui/forms'
 import { useEffect, useState, type ReactNode } from 'react'
 import { z } from 'zod'
-import { ErrorState } from '../features/common/query-state'
+import { ErrorState } from 'basalt-ui'
 import { useAssetToken, useAssetTokenStore } from './asset-token'
 import { useAuthStore } from './auth'
 

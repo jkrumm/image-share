@@ -14,9 +14,9 @@ import {
 } from '@mantine/core'
 import { useClipboard } from '@mantine/hooks'
 import { modals } from '@mantine/modals'
-import { DangerZone, EmptyState } from 'basalt-ui'
+import { DangerZone, EmptyState, QueryState } from 'basalt-ui'
 import { field, FormErrorSummary, useBasaltForm } from 'basalt-ui/forms'
-import { QueryState, notifyMutation } from '../features/common'
+import { notifyMutation } from '../features/common'
 import { AddTokenModal } from '../features/shares/add-token-modal'
 import { MinRatingInput } from '../features/shares/min-rating-input'
 import {

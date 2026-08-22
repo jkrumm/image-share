@@ -19,9 +19,13 @@ Bun workspaces monorepo, argo-patterned (`~/SourceRoot/argo` is the canonical re
 - `apps/admin` — Vite 8 + React 19 + basalt-ui SPA (Eden Treaty typed on the api `App` export).
   basalt's enforcement toolchain lives in `apps/admin` (`.basalt/manifest.json`, a nested
   `.oxlintrc.json` extending the shipped preset, managed `CLAUDE.md`/`DESIGN.md`/`.claude/`).
-  After a basalt bump: `cd apps/admin && bunx basalt-ui doctor && bunx basalt-ui sync && bunx basalt-ui check-theme`
-  (they also relocate there from the repo root since 1.20.0 — `lefthook.yml` extends the shipped
-  preset and relies on that). Head colors come from `basaltAppPlugin` in `vite.config.ts`, never a
+  After a basalt bump run the LOCAL bin, never `bunx` — `bunx` serves a cached tarball and will
+  happily report a passing scan from the previous version:
+  `B=apps/admin/node_modules/.bin/basalt-ui && $B doctor && $B sync && $B check-theme && $B check-theme --audit-allows && $B check-coverage`
+  (`--version` must say what package.json pins). They relocate to `apps/admin` on their own from
+  the repo root — verified equivalent since 1.24.0, which stopped the ascend path fabricating
+  `roots: ["src"]` and scanning a fraction; `lefthook.yml` extends the shipped preset and relies
+  on that. Head colors come from `basaltAppPlugin` in `vite.config.ts`, never a
   hex in `index.html`.
   Nav is one `defineNav` definition in `src/lib/nav.ts`, spread onto `BasaltShell` with `useNav` —
   never a hand-written sections array.

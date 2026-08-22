@@ -1,16 +1,7 @@
 // Shared admin building blocks. Pages import from here, not from the individual
-// files — one import line, one place to look for what already exists.
-
-export {
-  ErrorState,
-  LoadingState,
-  QueryState,
-  type EmptyCopy,
-  type ErrorStateProps,
-  type QueryStateLike,
-  type QueryStateProps,
-  type StateVariant,
-} from './query-state'
+// files — one import line, one place to look for what already exists. Query
+// loading/error/empty rendering is NOT here: `QueryState`, `LoadingState` and
+// `ErrorState` ship in basalt-ui, import them from there.
 
 export { RouteErrorComponent, RouteNotFound } from './route-error'
 
