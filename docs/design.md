@@ -46,7 +46,7 @@ NO `@kubiks/otel-drizzle` (Postgres-oriented; skip DB spans in v1 rather than fi
 NO aws-sdk — B2 S3 via built-in `Bun.S3Client`.
 
 apps/admin: `react/react-dom ^19.2.7`, `@mantine/{core,hooks,form,modals,notifications} ^9.3.0`,
-`basalt-ui 1.20.0` (exact), `@tanstack/react-query ^5.101.0`, `@tanstack/react-router ^1.170.0` (+ vite plugin),
+`basalt-ui 1.21.0` (exact), `@tanstack/react-query ^5.101.0`, `@tanstack/react-router ^1.170.0` (+ vite plugin),
 `@elysiajs/eden ^1.4.9`, `zustand ^5`, `vite ^8`, `@vitejs/plugin-react`.
 Root devDeps: `typescript`, `oxlint`, `oxfmt`, `lefthook`, `bun-types`/`@types/bun`, `concurrently`.
 bunfig.toml: `[install] minimumReleaseAgeExcludes = ["basalt-ui"]` (argo copy).
@@ -984,7 +984,9 @@ Since 1.20.0 those commands relocate to `apps/admin` on their own when run from 
 `index.html` and any `public/` tree are scanned too: head colors come from `basaltAppPlugin`
 (`vite.config.ts`, `themeColor: 'auto'` off `SURFACE.bg`, no manifest and no icon links), never a
 hand-written `theme-color` hex. `__APP_VERSION__` is declared by basalt's root barrel — no ambient
-block in `src/vite-env.d.ts`.
+block in `src/vite-env.d.ts`. Since 1.21.0 the preset's `oxfmt` glob is source extensions only, so
+the markdown carve-out `lefthook.yml` used to need is gone; `check-theme --audit-allows` proves
+every waiver still suppresses something (this repo has none).
 
 Notifications go through `features/common/notify.ts` → **`notifyMutation`**, never basalt's
 `notifyPromise`: the latter takes a static `error` ReactNode and never sees the rejection, so every

@@ -9,21 +9,13 @@
 #
 # NOTE on overriding the preset: lefthook lets `extends` WIN on a colliding key, so a
 # local `run:`/`glob:` under a preset command name is silently discarded. Only NEW keys
-# merge (`env:`, `exclude:`) — which is why the markdown carve-out below is an `exclude`.
+# merge (`env:`, `exclude:`, `skip:`). 1.21.0 narrowed the preset's `oxfmt` glob to
+# source extensions, so the markdown carve-out this file used to need is gone.
 extends:
   - apps/admin/node_modules/basalt-ui/configs/lefthook.yml
 
 pre-commit:
   commands:
-    oxfmt:
-      # The preset globs every staged `.md` at the repo ROOT, wider than the `format`
-      # script's `apps/**`. oxfmt pads markdown table separators (`| ---- |`); these docs
-      # use the minimum separator (`|-|-|`) by house rule, so the preset's glob fails the
-      # hook on files `bun run format` will not fix. Markdown under `apps/**` is still
-      # checked — by `bun run format:check` in the `check` command below.
-      exclude:
-        - '*.md'
-
     # Whole-tree checks the preset's staged-file commands do not cover: apps/api is
     # outside basalt's roots, and `sync --check` catches drift in the managed docs.
     check:
