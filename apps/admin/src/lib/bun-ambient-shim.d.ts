@@ -1,3 +1,4 @@
+// oxlint-disable typescript/no-explicit-any -- deliberately loose Bun shims; see below.
 // The Eden `App` type (see lib/eden.ts) is `typeof app` from apps/api/src/index.ts,
 // resolved via a TS path alias — so this browser project's tsc program transitively
 // type-checks the ENTIRE api source tree (not just its exported types) under THIS

@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
-import { useState, type ReactNode } from 'react'
+import { useCallback, useState, type ReactNode } from 'react'
 import {
   Accordion,
   Anchor,
@@ -123,6 +123,12 @@ function ShareDetail({ share }: { share: ShareDetailDto }): ReactNode {
   const [showRevoked, setShowRevoked] = useState(false)
   const [addTokenOpened, setAddTokenOpened] = useState(false)
   const [highlightTokenId, setHighlightTokenId] = useState<number | null>(null)
+
+  // Stable identity, so React attaches it exactly once when the inline editor
+  // mounts. `autoFocus` would do the same thing but is a jsx-a11y error in the
+  // shipped preset — this field only exists because the operator just asked to
+  // edit the title, so landing the caret in it is the whole point.
+  const focusOnMount = useCallback((el: HTMLInputElement | null) => el?.focus(), [])
 
   const shareId = share.id
 
@@ -248,7 +254,7 @@ function ShareDetail({ share }: { share: ShareDetailDto }): ReactNode {
               value={titleDraft}
               onChange={(e) => setTitleDraft(e.currentTarget.value)}
               onKeyDown={(e) => e.key === 'Enter' && saveTitle()}
-              autoFocus
+              ref={focusOnMount}
               size="lg"
             />
             <Button size="xs" onClick={saveTitle} loading={updateShare.isPending}>

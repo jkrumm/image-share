@@ -74,7 +74,9 @@ export function Lightbox({ images, index, onIndexChange, paging }: Props) {
       fullScreen
       withCloseButton={false}
       padding={0}
-      styles={{ body: { height: '100vh', display: 'flex', flexDirection: 'column' } }}
+      // The body is the lightbox's only child and `LightboxBody` is already a
+      // column `Stack h="100%"` — a plain full-viewport block box is all it needs.
+      styles={{ body: { height: '100vh' } }}
     >
       {image && (
         <LightboxBody

@@ -46,7 +46,7 @@ NO `@kubiks/otel-drizzle` (Postgres-oriented; skip DB spans in v1 rather than fi
 NO aws-sdk — B2 S3 via built-in `Bun.S3Client`.
 
 apps/admin: `react/react-dom ^19.2.7`, `@mantine/{core,hooks,form,modals,notifications} ^9.3.0`,
-`basalt-ui 1.1.1` (exact), `@tanstack/react-query ^5.101.0`, `@tanstack/react-router ^1.170.0` (+ vite plugin),
+`basalt-ui 1.19.1` (exact), `@tanstack/react-query ^5.101.0`, `@tanstack/react-router ^1.170.0` (+ vite plugin),
 `@elysiajs/eden ^1.4.9`, `zustand ^5`, `vite ^8`, `@vitejs/plugin-react`.
 Root devDeps: `typescript`, `oxlint`, `oxfmt`, `lefthook`, `bun-types`/`@types/bun`, `concurrently`.
 bunfig.toml: `[install] minimumReleaseAgeExcludes = ["basalt-ui"]` (argo copy).
@@ -969,6 +969,15 @@ basepath):
 Nav mental model (stage 4): **Library = private, on disk** vs **Public = published, on the CDN** —
 two peer nav items (labeled "Library (Private)" and "Public (CDN)") rather than the CDN state being
 buried in Activity.
+Nav is ONE typed definition — `lib/nav.ts` (`defineNav`/`navGroup`) spread onto `BasaltShell` via
+`useNav(NAV)` in `__root.tsx`. It drives the desktop sidebar AND the mobile bar; there is no
+`renderNavLink`/`renderBreadcrumbLink` callback and no target table (removed in basalt-ui 1.19).
+Library and Public carry a click-time `search` thunk (`Schema.parse({})`) because both routes
+validate a required search shape.
+The basalt enforcement toolchain is installed under `apps/admin` — `.basalt/manifest.json`,
+`.oxlintrc.json` extending the shipped preset (oxlint resolves it as a nested config, so root
+`oxlint .` picks it up), plus the managed `CLAUDE.md`/`DESIGN.md`/`.claude/` seeds. Run
+`bunx basalt-ui check-theme` + `doctor` + `sync --check` from `apps/admin` after any basalt bump.
 
 Notifications go through `features/common/notify.ts` → **`notifyMutation`**, never basalt's
 `notifyPromise`: the latter takes a static `error` ReactNode and never sees the rejection, so every

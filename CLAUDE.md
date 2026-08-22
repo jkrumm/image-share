@@ -17,6 +17,11 @@ Bun workspaces monorepo, argo-patterned (`~/SourceRoot/argo` is the canonical re
   Bun.S3Client (B2). Serves the admin SPA statically. Share access is token-only, role-scoped
   (view/download/full) — no passwords.
 - `apps/admin` — Vite 8 + React 19 + basalt-ui SPA (Eden Treaty typed on the api `App` export).
+  basalt's enforcement toolchain lives in `apps/admin` (`.basalt/manifest.json`, a nested
+  `.oxlintrc.json` extending the shipped preset, managed `CLAUDE.md`/`DESIGN.md`/`.claude/`).
+  After a basalt bump: `cd apps/admin && bunx basalt-ui doctor && bunx basalt-ui sync && bunx basalt-ui check-theme`.
+  Nav is one `defineNav` definition in `src/lib/nav.ts`, spread onto `BasaltShell` with `useNav` —
+  never a hand-written sections array.
 
 ## Commands
 

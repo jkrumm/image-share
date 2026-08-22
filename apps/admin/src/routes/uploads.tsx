@@ -113,7 +113,7 @@ function UploadsPage() {
 
 function UploadRowItem({ row }: { row: UploadRow }) {
   return (
-    <Paper withBorder p="sm">
+    <Paper p="sm">
       <Stack gap={6}>
         <Group justify="space-between" gap="sm" wrap="nowrap">
           <Text size="sm" truncate>

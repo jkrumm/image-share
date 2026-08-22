@@ -1,4 +1,14 @@
-import { Alert, Button, Code, Container, Group, Stack, Text, Title } from '@mantine/core'
+import {
+  Alert,
+  Button,
+  Code,
+  Container,
+  Group,
+  ScrollArea,
+  Stack,
+  Text,
+  Title,
+} from '@mantine/core'
 import { Link, useRouter, type ErrorComponentProps } from '@tanstack/react-router'
 import { VX } from 'basalt-ui/tokens'
 import type { ReactNode } from 'react'
@@ -38,9 +48,11 @@ export function RouteErrorComponent({ error, reset }: ErrorComponentProps): Reac
         </Alert>
 
         {import.meta.env.DEV && stack && (
-          <Code block style={{ fontSize: VX.text.micro, maxHeight: 280, overflow: 'auto' }}>
-            {stack}
-          </Code>
+          <ScrollArea.Autosize mah={280}>
+            <Code block style={{ fontSize: VX.text.micro }}>
+              {stack}
+            </Code>
+          </ScrollArea.Autosize>
         )}
 
         <Group gap="sm">

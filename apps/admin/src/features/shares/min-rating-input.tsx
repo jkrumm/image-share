@@ -1,4 +1,4 @@
-import { Group, Input, Rating, Text } from '@mantine/core'
+import { Anchor, Group, Input, Rating } from '@mantine/core'
 import type { ReactNode } from 'react'
 
 type Props = {
@@ -31,17 +31,9 @@ export function MinRatingInput({
       <Group gap="xs" mt={4}>
         <Rating size={size === 'xs' ? 'sm' : undefined} value={value} onChange={onChange} />
         {value > 0 && (
-          <Text
-            size="xs"
-            c="dimmed"
-            style={{ cursor: 'pointer' }}
-            role="button"
-            tabIndex={0}
-            onClick={() => onChange(0)}
-            onKeyDown={(e) => e.key === 'Enter' && onChange(0)}
-          >
+          <Anchor component="button" type="button" size="xs" c="dimmed" onClick={() => onChange(0)}>
             clear
-          </Text>
+          </Anchor>
         )}
       </Group>
     </Input.Wrapper>

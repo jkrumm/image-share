@@ -205,7 +205,11 @@ function PublicPage() {
           <SimpleGrid cols={{ base: 2, sm: 3, lg: 5 }} spacing="sm">
             <StatCard label="Objects" value={formatNumber(summary.objects)} />
             <StatCard label="Total size" value={formatBytes(summary.totalBytes)} />
-            <StatCard label="Not mirrored" value={formatNumber(summary.unmirroredCount)} />
+            <StatCard
+              label="Not mirrored"
+              value={formatNumber(summary.unmirroredCount)}
+              tone={summary.unmirroredCount > 0 ? 'warn' : 'good'}
+            />
             <StatCard
               label="Last reconcile"
               value={formatDateTime(summary.lastReconcileAt, 'never')}
@@ -385,7 +389,7 @@ function B2Tile({ obj, onDelete }: { obj: B2ObjectDto; onDelete: () => void }) {
   const [broken, setBroken] = useState(false)
 
   return (
-    <Paper withBorder p="xs">
+    <Paper p="xs">
       <Stack gap={6}>
         <div style={{ position: 'relative' }}>
           {!obj.mirrored && (

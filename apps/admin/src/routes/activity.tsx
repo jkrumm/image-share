@@ -43,7 +43,13 @@ function ActivityPage() {
             <StatCard label="Shares" value={formatNumber(stats.shares)} />
             <StatCard label="Active tokens" value={formatNumber(stats.activeTokens)} />
             <StatCard label="B2 objects" value={formatNumber(stats.b2Objects)} />
-            <StatCard label="B2 unmirrored" value={formatNumber(stats.b2Unmirrored)} />
+            <StatCard
+              label="B2 unmirrored"
+              value={formatNumber(stats.b2Unmirrored)}
+              // Zero IS the earned state here — every published key is on the CDN — so it
+              // asserts `good` rather than staying untinted.
+              tone={stats.b2Unmirrored > 0 ? 'warn' : 'good'}
+            />
             <StatCard label="Rendition cache" value={formatBytes(stats.renditionCacheBytes)} />
             <StatCard label="DB size" value={formatBytes(stats.dbSizeBytes)} />
             <StatCard label="Last index" value={formatDateTime(stats.lastIndexAt, 'never')} />

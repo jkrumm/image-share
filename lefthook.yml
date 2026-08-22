@@ -1,4 +1,8 @@
 pre-commit:
   commands:
     check:
-      run: bun run format:check && bun run lint
+      # `lint:basalt` runs check-theme + sync --check from apps/admin. The shipped
+      # preset (node_modules/basalt-ui/configs/lefthook.yml) is NOT extended here: its
+      # check-theme command runs at the repo root, where the `basalt` config and the
+      # manifest do not live, so it would scan zero files.
+      run: bun run format:check && bun run lint && bun run lint:basalt

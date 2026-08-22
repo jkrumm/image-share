@@ -28,6 +28,7 @@ export function AddTokenModal({ shareId, opened, onClose, onCreated }: Props): R
         setLabel('')
         onClose()
         onCreated?.(token)
+        return token
       })
       .catch(() => {
         /* the real server message is already on screen */

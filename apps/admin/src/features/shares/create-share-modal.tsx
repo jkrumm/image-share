@@ -270,7 +270,10 @@ export function CreateShareModal({ opened, onClose, source, onCreated }: Props):
           <TextInput
             label="Title"
             placeholder="Mallorca 2026"
-            autoFocus
+            // Mantine's Modal focus trap focuses `[data-autofocus]` on open — the
+            // supported form, and the one that does not move focus for a user who
+            // reached the field some other way.
+            data-autofocus
             description={
               form.values.title === ''
                 ? undefined

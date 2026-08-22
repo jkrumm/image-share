@@ -413,7 +413,7 @@ function LibraryPage() {
             )}
 
             {selection.size > 0 && (
-              <Paper withBorder p="xs">
+              <Paper p="xs">
                 <Stack gap="xs">
                   <Group justify="space-between" gap="xs" wrap="wrap">
                     <Text size="sm">{formatNumber(selection.size)} selected</Text>

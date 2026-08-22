@@ -43,12 +43,15 @@ export function TokenRow({ token, highlighted = false, onRevoke }: Props): React
   return (
     <Paper
       ref={ref}
-      withBorder
       p="xs"
       style={{
         opacity: revoked ? 0.55 : 1,
         ...(highlighted && {
-          boxShadow: `0 0 0 2px ${VX.accent}`,
+          // A transient "this is the token you just minted" ring. Setting boxShadow
+          // REPLACES the theme's `--vx-shadow-card`, so it is composed back in first
+          // — otherwise the highlighted row silently loses the card depth every
+          // other row has. (check-theme's raw-surface kind does not see this.)
+          boxShadow: `${VX.shadowCard}, 0 0 0 2px ${VX.accent}`,
           backgroundColor: alpha(VX.accent, 0.06),
         }),
       }}
