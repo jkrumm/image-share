@@ -1,8 +1,30 @@
+# The shipped basalt preset is extended, not copied — it auto-updates with the package.
+# Path is `apps/admin/node_modules/...`: under bun's isolated linker basalt-ui installs
+# beside the package that depends on it, and a root-relative `extends` resolves to
+# nothing there (lefthook merges a missing file silently).
+#
+# Since basalt-ui 1.20.0 the preset's `check-theme` relocates to the one workspace
+# package carrying a basalt config, so it really scans apps/admin from the repo root.
+# Before that it reported `0 files scanned` and the gate never gated.
+#
+# NOTE on overriding the preset: lefthook lets `extends` WIN on a colliding key, so a
+# local `run:`/`glob:` under a preset command name is silently discarded. Only NEW keys
+# merge (`env:`, `exclude:`) — which is why the markdown carve-out below is an `exclude`.
+extends:
+  - apps/admin/node_modules/basalt-ui/configs/lefthook.yml
+
 pre-commit:
   commands:
+    oxfmt:
+      # The preset globs every staged `.md` at the repo ROOT, wider than the `format`
+      # script's `apps/**`. oxfmt pads markdown table separators (`| ---- |`); these docs
+      # use the minimum separator (`|-|-|`) by house rule, so the preset's glob fails the
+      # hook on files `bun run format` will not fix. Markdown under `apps/**` is still
+      # checked — by `bun run format:check` in the `check` command below.
+      exclude:
+        - '*.md'
+
+    # Whole-tree checks the preset's staged-file commands do not cover: apps/api is
+    # outside basalt's roots, and `sync --check` catches drift in the managed docs.
     check:
-      # `lint:basalt` runs check-theme + sync --check from apps/admin. The shipped
-      # preset (node_modules/basalt-ui/configs/lefthook.yml) is NOT extended here: its
-      # check-theme command runs at the repo root, where the `basalt` config and the
-      # manifest do not live, so it would scan zero files.
-      run: bun run format:check && bun run lint && bun run lint:basalt
+      run: bun run format:check && bun run lint && bun run --cwd apps/admin basalt-ui sync --check

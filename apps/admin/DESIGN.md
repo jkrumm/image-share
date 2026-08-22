@@ -1,6 +1,6 @@
 # @image-share/admin — Design
 
-> Managed by basalt-ui (1.19.1). This is a **thin** instantiation — it records this
+> Managed by basalt-ui (1.20.0). This is a **thin** instantiation — it records this
 > app's **deltas only** on top of the shipped `basalt-*` rules. The universal law (earned color,
 > neutral-by-default, three-tier `--vx-*` tokens, theme-is-data, the chart primitive contract, the
 > elevation/density/shape doctrine) lives in those rules and the `/basalt:design` skill, and is
@@ -57,7 +57,10 @@ empty section is the correct default; do not invent deviations to fill it.
 
 - **No icon set.** No icon library is installed, so every `SidebarItem`/mobile-bar slot is
   label-only and `EmptyState`/`route-error` are text-only. Deliberate — the admin is single-user
-  and five destinations do not need glyphs.
+  and five destinations do not need glyphs. Supported since basalt-ui 1.20.0 floored `.tabIcon`:
+  the mobile active pill is 48x28 with or without a glyph (it was a 24x4 dash on 1.19.1).
+- **`basaltAppPlugin` with `manifest: false, icons: false`** (`vite.config.ts`) — head colors only.
+  The admin is behind auth under `/admin`; it is not installable and ships no icon set.
 - **`notifyMutation` over `notifyPromise`** (`features/common/notify.ts`) — `notifyPromise` takes a
   static `error` node and never sees the rejection, so every failure read the same generic line
   instead of the server's message. See `docs/design.md` §12.

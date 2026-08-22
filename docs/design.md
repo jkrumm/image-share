@@ -46,7 +46,7 @@ NO `@kubiks/otel-drizzle` (Postgres-oriented; skip DB spans in v1 rather than fi
 NO aws-sdk — B2 S3 via built-in `Bun.S3Client`.
 
 apps/admin: `react/react-dom ^19.2.7`, `@mantine/{core,hooks,form,modals,notifications} ^9.3.0`,
-`basalt-ui 1.19.1` (exact), `@tanstack/react-query ^5.101.0`, `@tanstack/react-router ^1.170.0` (+ vite plugin),
+`basalt-ui 1.20.0` (exact), `@tanstack/react-query ^5.101.0`, `@tanstack/react-router ^1.170.0` (+ vite plugin),
 `@elysiajs/eden ^1.4.9`, `zustand ^5`, `vite ^8`, `@vitejs/plugin-react`.
 Root devDeps: `typescript`, `oxlint`, `oxfmt`, `lefthook`, `bun-types`/`@types/bun`, `concurrently`.
 bunfig.toml: `[install] minimumReleaseAgeExcludes = ["basalt-ui"]` (argo copy).
@@ -978,6 +978,13 @@ The basalt enforcement toolchain is installed under `apps/admin` — `.basalt/ma
 `.oxlintrc.json` extending the shipped preset (oxlint resolves it as a nested config, so root
 `oxlint .` picks it up), plus the managed `CLAUDE.md`/`DESIGN.md`/`.claude/` seeds. Run
 `bunx basalt-ui check-theme` + `doctor` + `sync --check` from `apps/admin` after any basalt bump.
+Since 1.20.0 those commands relocate to `apps/admin` on their own when run from the repo root, so
+`lefthook.yml` extends the shipped preset (`apps/admin/node_modules/basalt-ui/configs/lefthook.yml`
+— the isolated-linker path, not a root-relative one) instead of hand-writing the gate.
+`index.html` and any `public/` tree are scanned too: head colors come from `basaltAppPlugin`
+(`vite.config.ts`, `themeColor: 'auto'` off `SURFACE.bg`, no manifest and no icon links), never a
+hand-written `theme-color` hex. `__APP_VERSION__` is declared by basalt's root barrel — no ambient
+block in `src/vite-env.d.ts`.
 
 Notifications go through `features/common/notify.ts` → **`notifyMutation`**, never basalt's
 `notifyPromise`: the latter takes a static `error` ReactNode and never sees the rejection, so every

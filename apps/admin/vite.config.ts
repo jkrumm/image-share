@@ -1,5 +1,5 @@
 import { defineConfig, mergeConfig } from 'vite'
-import { basaltViteConfig } from 'basalt-ui/vite'
+import { basaltAppPlugin, basaltViteConfig } from 'basalt-ui/vite'
 import react from '@vitejs/plugin-react'
 import { TanStackRouterVite } from '@tanstack/router-plugin/vite'
 import { resolve } from 'path'
@@ -25,7 +25,16 @@ export default defineConfig(
     // The admin SPA is served under /admin (design §1) — emit /admin/-prefixed
     // asset URLs so the built index.html loads from the right path.
     base: '/admin/',
-    plugins: [TanStackRouterVite({ target: 'react', autoCodeSplitting: true }), react()],
+    plugins: [
+      TanStackRouterVite({ target: 'react', autoCodeSplitting: true }),
+      react(),
+      // Head metadata only. `themeColor: 'auto'` derives the light/dark `theme-color`
+      // pair from basalt's own SURFACE.bg token, so it tracks the palette instead of
+      // rotting as a copied hex (check-theme's raw-hex kind reports the copy since
+      // 1.20.0). No manifest and no icon links: this is a single-user admin SPA behind
+      // auth, served under /admin — it is not installable and ships no icon set.
+      ...basaltAppPlugin({ name: 'Image Share', manifest: false, icons: false }),
+    ],
     resolve: {
       alias: {
         '@image-share/api': resolve(import.meta.dirname, '../api/src'),
