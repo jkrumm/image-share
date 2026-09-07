@@ -1,10 +1,6 @@
 # image-share
 
-Personal image service on the HomeLab: read-only index of the Fuji photo tree (`fuji`/`raws`
-roots) plus a service-owned ingest area (`share` root), friend sharing via slug+role-scoped
-token (`share.jkrumm.com`), on-demand renditions, bearer-token ingest API for agents, publish-to-B2
-(`img.jkrumm.com` CDN). Single user, filesystem is truth, DB is a rebuildable cache (except
-shares/share_images/tokens → nightly snapshot).
+What it is, in one paragraph: `README.md`. This file holds the stack, commands and rules.
 
 **Read `docs/design.md` before changing anything — it is the implementation contract.**
 `PRD.md` holds intent; where they conflict, design.md wins (it resolves the PRD's inline notes).

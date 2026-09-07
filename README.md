@@ -4,7 +4,8 @@ Personal image service on the HomeLab: a read-only index over the existing photo
 tree, friend sharing via slug + role-scoped rollable token (`share.jkrumm.com`),
 on-demand renditions, a bearer-token ingest API for agents, and publish-to-B2
 (`img.jkrumm.com` CDN). Single user, filesystem is truth, the DB is a rebuildable
-cache (except `shares`/`share_tokens`, which are snapshotted nightly).
+cache (except `shares`/`share_images`/`share_tokens`, the non-rebuildable set the nightly
+`VACUUM INTO` snapshot exists for).
 
 ## Browsing
 

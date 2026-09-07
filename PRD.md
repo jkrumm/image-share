@@ -1,5 +1,8 @@
 # image-share — PRD
 
+> **Status:** shipped 2026-07-21 (indexer, share links, renditions, ingest API, admin SPA, publish-to-B2).
+> Goal 6 / success criterion 6 (Immich retirement) is **not executed** — Immich still runs in the homelab stack.
+
 Personal OSS image service on the HomeLab: a thin layer over the existing photo
 filesystem and the B2/imgproxy CDN. Replaces Immich's actual role (folder gallery +
 friend sharing) and becomes the single ingest/serving/manamgent door for images across blogs,
