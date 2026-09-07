@@ -5,7 +5,7 @@
 
 Personal OSS image service on the HomeLab: a thin layer over the existing photo
 filesystem and the B2/imgproxy CDN. Replaces Immich's actual role (folder gallery +
-friend sharing) and becomes the single ingest/serving/manamgent door for images across blogs,
+friend sharing) and becomes the single ingest/serving/management door for images across blogs,
 the Obsidian vault, and agents. Deliberately modest — not a product, not
 multi-tenant, not a photo editor.
 
@@ -17,7 +17,7 @@ a full ML/Postgres stack just to mirror folders and share albums with friends; t
 static photo-gallery bakes images into each build; the Obsidian vault has no sanctioned
 way to reference images; agents have no upload target. Meanwhile a public image CDN
 (B2 `jkrumm` bucket  + img folder + imgproxy at `img.jkrumm.com`) now exists but has no
-management layer. It is accessabel for agents with our recent work in dotfiles wiring up the Claude Code skill and the homelab modified traefik api. One small service can cover gallery, sharing, ingest, manamgenent and publish —
+management layer, reachable from agents via the dotfiles `/img` skill. One small service can cover gallery, sharing, ingest, management and publish —
 on top of the storage that already exists, without owning it.
 
 ## Goals

@@ -897,28 +897,20 @@ thousands of files on a 4-core box.
 
 telemetry.ts, traced-fetch.ts, plugin order, `checkIfShouldTrace` (skip /, /health, /openapi, SPA assets),
 onError span recorder: copy argo verbatim (adapted service name `image-share`). `OTEL_EXPORTER_OTLP_ENDPOINT`
-default `http://clickstack:4319` in prod compose, unset locally = no-op exporter guard like argo.
+is empty in the live HomeLab compose (no ClickStack/OTel receiver there, only on the VPS) — empty trips the
+no-op exporter guard like argo, same as local dev.
 env.ts: single Zod object, fail-fast, defaults for local dev (paths under `.dev/`), heavily commented.
 Errors: throw + bubble; guard throws `status(401)`; share routes catch-all → the clean 404 page.
 
 ## 11. Deployment (changes in ~/SourceRoot/homelab — prepared by the homelab agent, pushed after review)
 
-- Server clone: `/home/jkrumm/image-share` (GitHub `jkrumm/image-share`, direct-to-master).
-- compose service `image-share`: `build: { context: /home/jkrumm/image-share/apps/api/../.. }` → actually
-  `context: /home/jkrumm/image-share`, `dockerfile: apps/api/Dockerfile`; container_name `image-share`;
-  networks `[cloudflared]`; mem limit 1G; healthcheck curl `/health` (port 7720); labels: glance
-  (`glance.name: Image Share`, `si:imgproxy`… pick a sensible simpleicon, `glance.url: https://share.jkrumm.com/admin`),
-  `com.centurylinklabs.watchtower.enable: 'false'` (local build).
-  Volumes (as shipped, `~/SourceRoot/homelab/docker-compose.yml`): `/home/jkrumm/ssd/SSD/Bilder/Fuji:/photos/fuji:ro`,
-  `/mnt/hdd/fuji/RAWs:/photos/raws:ro`, `/home/jkrumm/ssd/SSD/Bilder/ImageShare:/photos/share` (rw —
-  service-owned, no `:ro`), `/home/jkrumm/ssd/SSD/Bilder/B2-Mirror:/photos/b2-mirror`,
-  `/home/jkrumm/ssd/image-share:/data`, `/home/jkrumm/ssd/SSD/Dev/image-share:/backup`, `/etc/localtime:/etc/localtime:ro`.
-  Env: `API_SECRET=${IMAGE_SHARE_API_SECRET}`, `FUJI_ROOT`/`RAWS_ROOT`/`SHARE_ROOT`/`B2_MIRROR_DIR`/`DATA_DIR`/`SNAPSHOT_DIR`
-  set to the container paths above (must match the mounts — see env.ts, design §3), the B2 five-pack
-  (`B2_ENDPOINT`/`B2_REGION`/`B2_BUCKET`/`B2_KEY_ID`/`B2_APP_KEY` — exact env var names env.ts reads;
-  see the credential note below), `SHARE_BASE_URL=https://share.jkrumm.com`,
-  `CDN_BASE=https://img.jkrumm.com`, `OTEL_EXPORTER_OTLP_ENDPOINT=` (empty until ClickStack exists on homelab —
-  homelab agent verifies; if no clickstack container there, leave unset), `TZ=Europe/Berlin`.
+The service definition, volume mounts, env var names, Caddy routing, Makefile targets and Kuma
+monitors are declared in `~/SourceRoot/homelab` (`docker-compose.yml`, `Caddyfile`,
+`uptime-kuma/monitors.yaml`) — that repo is the live source, not a copy here; read it directly
+rather than trusting a snapshot in this file. What's below is reasoning that compose can't carry.
+
+- Server clone: `/home/jkrumm/image-share` (GitHub `jkrumm/image-share`, direct-to-master, sibling
+  clone — not `packages/`, since Watchtower can't auto-update a local build).
 - **B2 credential note (scoped-key migration)**: `B2_KEY_ID`/`B2_APP_KEY` moved from the shared
   `op://common/b2-images-write` key to a dedicated, service-scoped key at
   `op://homelab/image-share/{B2_KEY_ID,B2_APP_KEY}` — capabilities `listFiles`/`readFiles`/`writeFiles`/`deleteFiles`,
@@ -927,23 +919,13 @@ Errors: throw + bubble; guard throws `status(401)`; share routes catch-all → t
   `S3Port.delete`. The scoped key deployed 2026-07-24 and the route is verified working in
   production. `B2_ENDPOINT`/`B2_REGION`/`B2_BUCKET` are non-secret bucket config, unaffected,
   and stay on the shared `op://common/backblaze-s3` refs.
-- Caddyfile: single `share.jkrumm.com` site block — plain `reverse_proxy image-share:7720`
-  handles for `/health`, `/api/*`, `/openapi*`, `/admin*`, `/s/*`, then a catch-all handle with
-  `rewrite * /s{uri}` + `reverse_proxy` for the friend share slugs.
-- `.env.tpl`: `IMAGE_SHARE_API_SECRET=op://homelab/image-share/API_SECRET`,
-  `IMAGE_SHARE_B2_KEY_ID=op://homelab/image-share/B2_KEY_ID`,
-  `IMAGE_SHARE_B2_APP_KEY=op://homelab/image-share/B2_APP_KEY`,
-  `IMAGE_SHARE_B2_ENDPOINT`/`IMAGE_SHARE_B2_REGION`/`IMAGE_SHARE_B2_BUCKET=op://common/backblaze-s3/{ENDPOINT,REGION,BUCKET}`.
-- Makefile: `image-share-deploy` (pull ~/image-share + build --no-cache + up -d), `-restart`, `-logs`.
-- uptime-kuma monitors.yaml: Image Share subgroup — docker monitor + `https://share.jkrumm.com/health`
-  (cloudflare_bypass).
 - restic: NO changes (ImageShare/B2-Mirror land inside the Bilder source; live DB + renditions live
   outside all sources; snapshots land in the Dev source).
-- Dockerfile: `oven/bun:1.3` (Debian, NOT alpine — perl + glibc sharp prebuilds), two-stage:
-  builder installs workspaces + `vite build` admin; runner: `apt-get install -y curl perl libjemalloc2`,
-  `ENV LD_PRELOAD=/usr/lib/<arch>/libjemalloc.so.2` (arch-detect at build), non-root user with access to
-  mounted volumes (match host uid 1000), `CMD bun run apps/api/src/index.ts`, HEALTHCHECK like argo.
-- DNS (deploy-time, /cloudflare skill): proxied CNAME `share` → `<TUNNEL_ID>.cfargotunnel.com`.
+- Dockerfile (owned here, in `apps/api/Dockerfile`, not homelab): `oven/bun:1.3` (Debian, NOT alpine —
+  perl + glibc sharp prebuilds), two-stage: builder installs workspaces + `vite build` admin; runner:
+  `apt-get install -y curl perl libjemalloc2`, `ENV LD_PRELOAD=/usr/lib/<arch>/libjemalloc.so.2`
+  (arch-detect at build), non-root user with access to mounted volumes (match host uid 1000),
+  `CMD bun run apps/api/src/index.ts`, HEALTHCHECK like argo.
 - **Rolling back past the album feature is one-way, and the DB does not roll back with the image.**
   Migrations are backward-tolerant (added tables/columns; an older binary ignores them), so nothing
   stops `make image-share-deploy` from rebuilding an older clone — but once an album share exists:
