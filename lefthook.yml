@@ -4,12 +4,13 @@
 # nothing there (lefthook merges a missing file silently).
 #
 # The preset's `check-theme` runs from the repo ROOT, and since basalt-ui 1.29.0 the CLI
-# no longer ascends or relocates on its own — one resolver, `BASALT_CWD` then cwd — so it
-# reported `0 files scanned` there and the gate stopped gating (a hard failure, not a
-# silent one, since 1.22.0). `env:` below points it at the one package carrying a basalt
-# config; `BASALT_BIN` is set for the same reason `extends` is a workspace path — the
-# preset's `bunx --no-install basalt-ui` fallback finds nothing at the root under bun's
-# isolated linker.
+# no longer ascends or relocates on its own — one resolver, `BASALT_CWD` then cwd — so at
+# the root it reads a directory with no basalt config. `BASALT_CWD` below names the one
+# package that carries one, and it is still required: 1.30.0 fixed the preset's BIN
+# default, not the resolver. That default is now `<BASALT_CWD>/node_modules/.bin/basalt-ui`
+# — exactly the path this file used to pin — so the `BASALT_BIN` half of the patch is gone.
+# `root: 'apps/admin/'` is the other sanctioned fix; `BASALT_CWD` is kept because oxlint
+# and oxfmt do want to run at the root, where this repo's oxlint config and binaries are.
 #
 # NOTE on overriding the preset: lefthook lets `extends` WIN on a colliding key, so a
 # local `run:`/`glob:` under a preset command name is silently discarded. Only NEW keys
@@ -28,5 +29,4 @@ pre-commit:
     # discarded the way a colliding `run:` would be.
     check-theme:
       env:
-        BASALT_BIN: ./apps/admin/node_modules/.bin/basalt-ui
         BASALT_CWD: apps/admin
