@@ -1,8 +1,8 @@
-import { Button, Center, Container, Loader, PasswordInput, Stack, Text, Title } from '@mantine/core'
-import { field, useBasaltForm } from 'basalt-ui/forms'
+import { Button, Center, Container, Loader, PasswordInput, Stack, Text } from '@mantine/core'
+import { fieldKey, inputProps, useBasaltForm } from 'basalt-ui/forms'
 import { useEffect, useState, type ReactNode } from 'react'
 import { z } from 'zod'
-import { ErrorState } from 'basalt-ui'
+import { ErrorState, PageTitle } from 'basalt-ui'
 import { useAssetToken, useAssetTokenStore } from './asset-token'
 import { useAuthStore } from './auth'
 
@@ -99,13 +99,10 @@ function TokenPrompt() {
   return (
     <Container size="xs" pt={120} pb={64}>
       <Stack gap="lg">
-        <Stack gap={4}>
-          <Title order={2}>Image Share</Title>
-          <Text c="dimmed" size="sm">
-            Enter the API_SECRET bearer token to continue. It is stored in this browser&apos;s
-            localStorage and reused on every request.
-          </Text>
-        </Stack>
+        <PageTitle
+          title="Image Share"
+          subtitle="Enter the API_SECRET bearer token to continue. It is stored in this browser's localStorage and reused on every request."
+        />
         <form
           onSubmit={form.onSubmit(({ token }) => {
             setToken(token.trim())
@@ -117,7 +114,8 @@ function TokenPrompt() {
               label="API token"
               placeholder="Bearer token"
               autoComplete="current-password"
-              {...field(form, 'token')}
+              key={fieldKey(form, 'token')}
+              {...inputProps(form, 'token')}
             />
             <Button type="submit">Sign in</Button>
           </Stack>

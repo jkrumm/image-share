@@ -40,7 +40,7 @@ export function DirTree({ root, dir, onSelect }: Props) {
   return (
     <QueryState
       query={query}
-      variant="section"
+      tier="section"
       errorTitle="Could not load folders"
       empty={{ title: 'No folders', description: 'Nothing has been indexed yet.' }}
       loading={

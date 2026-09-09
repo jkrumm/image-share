@@ -15,7 +15,7 @@ import {
 } from '@mantine/core'
 import { useNavigate } from '@tanstack/react-router'
 import { useMemo, useState, type ReactNode } from 'react'
-import { field, FormErrorSummary, useBasaltForm } from 'basalt-ui/forms'
+import { fieldKey, FormErrorSummary, inputProps, useBasaltForm } from 'basalt-ui/forms'
 import { notifyMutation } from '../common'
 import { toErrorMessage } from '../../lib/eden'
 import { formatNumber } from '../../lib/format'
@@ -247,7 +247,8 @@ export function CreateShareModal({ opened, onClose, source, onCreated }: Props):
                   label="Directory"
                   description="Empty means the whole root"
                   placeholder="2026/mallorca"
-                  {...field(form, 'dir')}
+                  key={fieldKey(form, 'dir')}
+                  {...inputProps(form, 'dir')}
                 />
               )}
 
@@ -281,14 +282,16 @@ export function CreateShareModal({ opened, onClose, source, onCreated }: Props):
                   ? `${shareBaseUrl}/${slugPreview}`
                   : `/${slugPreview}`
             }
-            {...field(form, 'title')}
+            key={fieldKey(form, 'title')}
+            {...inputProps(form, 'title')}
           />
           <Textarea
             label="Note"
             placeholder="Optional note — markdown is supported"
             autosize
             minRows={2}
-            {...field(form, 'note')}
+            key={fieldKey(form, 'note')}
+            {...inputProps(form, 'note')}
           />
 
           <Divider label="Links" labelPosition="left" />
@@ -298,7 +301,8 @@ export function CreateShareModal({ opened, onClose, source, onCreated }: Props):
             description="The first link, minted with the share"
             data={ROLE_OPTIONS}
             allowDeselect={false}
-            {...field(form, 'role')}
+            key={fieldKey(form, 'role')}
+            {...inputProps(form, 'role')}
           />
 
           <Checkbox
@@ -314,12 +318,14 @@ export function CreateShareModal({ opened, onClose, source, onCreated }: Props):
                 label="Second link"
                 data={ROLE_OPTIONS}
                 allowDeselect={false}
-                {...field(form, 'secondRole')}
+                key={fieldKey(form, 'secondRole')}
+                {...inputProps(form, 'secondRole')}
               />
               <TextInput
                 label="Who it is for"
                 placeholder="e.g. Tom"
-                {...field(form, 'secondLabel')}
+                key={fieldKey(form, 'secondLabel')}
+                {...inputProps(form, 'secondLabel')}
               />
             </Group>
           )}

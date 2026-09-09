@@ -1,15 +1,6 @@
-import {
-  Alert,
-  Button,
-  Code,
-  Container,
-  Group,
-  ScrollArea,
-  Stack,
-  Text,
-  Title,
-} from '@mantine/core'
+import { Alert, Button, Code, Container, Group, ScrollArea, Stack, Text } from '@mantine/core'
 import { Link, useRouter, type ErrorComponentProps } from '@tanstack/react-router'
+import { PageTitle } from 'basalt-ui'
 import { VX } from 'basalt-ui/tokens'
 import type { ReactNode } from 'react'
 
@@ -36,12 +27,10 @@ export function RouteErrorComponent({ error, reset }: ErrorComponentProps): Reac
   return (
     <Container size="sm" pt={64} pb={64}>
       <Stack gap="lg">
-        <Stack gap={4}>
-          <Title order={2}>Something went wrong</Title>
-          <Text c="dimmed" size="sm">
-            This page hit an unexpected error. The rest of the admin is still usable.
-          </Text>
-        </Stack>
+        <PageTitle
+          title="Something went wrong"
+          subtitle="This page hit an unexpected error. The rest of the admin is still usable."
+        />
 
         <Alert color="red" variant="light" title={name}>
           <Text size="sm">{message || 'Unknown error'}</Text>
@@ -74,12 +63,7 @@ export function RouteNotFound(): ReactNode {
   return (
     <Container size="sm" pt={64} pb={64}>
       <Stack gap="lg">
-        <Stack gap={4}>
-          <Title order={2}>Page not found</Title>
-          <Text c="dimmed" size="sm">
-            That URL does not exist in the admin.
-          </Text>
-        </Stack>
+        <PageTitle title="Page not found" subtitle="That URL does not exist in the admin." />
         <Group gap="sm">
           <Button component={Link} to="/">
             Back to library

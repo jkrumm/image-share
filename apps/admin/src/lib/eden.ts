@@ -20,7 +20,7 @@ export const client = treaty<App>(baseUrl, {
 
 // ── Error surfacing ──────────────────────────────────────────────────────────
 //
-// `unwrap` (basalt-ui/query) throws the raw Eden envelope — a `{ status, value }`
+// `unwrap` (basalt-ui) throws the raw Eden envelope — a `{ status, value }`
 // object that prints as `[object Object]`, which is why call sites historically
 // fell back to a hardcoded string and swallowed the real reason ('slug already in
 // use', a 403 on deleting a fuji image). basalt-ui decodes it: `toErrorMessage`
@@ -28,7 +28,7 @@ export const client = treaty<App>(baseUrl, {
 // when the body says nothing readable; `errorStatus` exposes the status so a page
 // can branch on it (404 → "not found" copy). Re-exported so a page needs one
 // import for everything Eden-shaped.
-export { errorStatus, toErrorMessage } from 'basalt-ui/query'
+export { errorStatus, toErrorMessage } from 'basalt-ui'
 
 // ── Image bytes ──────────────────────────────────────────────────────────────
 

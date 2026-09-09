@@ -72,7 +72,7 @@ export function BrowsePanel({
       ) : (
         <QueryState
           query={albumsQuery}
-          variant="section"
+          tier="section"
           errorTitle="Could not load albums"
           loading={
             <Stack gap={4}>

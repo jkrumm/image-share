@@ -3,9 +3,13 @@
 # beside the package that depends on it, and a root-relative `extends` resolves to
 # nothing there (lefthook merges a missing file silently).
 #
-# Since basalt-ui 1.20.0 the preset's `check-theme` relocates to the one workspace
-# package carrying a basalt config, so it really scans apps/admin from the repo root.
-# Before that it reported `0 files scanned` and the gate never gated.
+# The preset's `check-theme` runs from the repo ROOT, and since basalt-ui 1.29.0 the CLI
+# no longer ascends or relocates on its own — one resolver, `BASALT_CWD` then cwd — so it
+# reported `0 files scanned` there and the gate stopped gating (a hard failure, not a
+# silent one, since 1.22.0). `env:` below points it at the one package carrying a basalt
+# config; `BASALT_BIN` is set for the same reason `extends` is a workspace path — the
+# preset's `bunx --no-install basalt-ui` fallback finds nothing at the root under bun's
+# isolated linker.
 #
 # NOTE on overriding the preset: lefthook lets `extends` WIN on a colliding key, so a
 # local `run:`/`glob:` under a preset command name is silently discarded. Only NEW keys
@@ -20,3 +24,9 @@ pre-commit:
     # outside basalt's roots, and `sync --check` catches drift in the managed docs.
     check:
       run: bun run format:check && bun run lint && bun run --cwd apps/admin basalt-ui sync --check
+    # `env:` is a NEW key under a preset command name, so it merges instead of being
+    # discarded the way a colliding `run:` would be.
+    check-theme:
+      env:
+        BASALT_BIN: ./apps/admin/node_modules/.bin/basalt-ui
+        BASALT_CWD: apps/admin

@@ -32,28 +32,28 @@ function ActivityPage() {
         query={statsQuery}
         errorTitle="Could not load stats"
         errorFallback="The service did not return its counters."
-        variant="section"
+        tier="section"
       >
         {(stats) => (
           <SimpleGrid cols={{ base: 2, sm: 3, lg: 6 }} spacing="sm">
-            <StatCard label="Images" value={formatNumber(stats.images)} />
-            <StatCard label="JPEGs" value={formatNumber(stats.jpegs)} />
-            <StatCard label="RAWs" value={formatNumber(stats.raws)} />
-            <StatCard label="Share uploads" value={formatNumber(stats.share)} />
-            <StatCard label="Shares" value={formatNumber(stats.shares)} />
-            <StatCard label="Active tokens" value={formatNumber(stats.activeTokens)} />
-            <StatCard label="B2 objects" value={formatNumber(stats.b2Objects)} />
+            <StatCard title="Images" value={formatNumber(stats.images)} />
+            <StatCard title="JPEGs" value={formatNumber(stats.jpegs)} />
+            <StatCard title="RAWs" value={formatNumber(stats.raws)} />
+            <StatCard title="Share uploads" value={formatNumber(stats.share)} />
+            <StatCard title="Shares" value={formatNumber(stats.shares)} />
+            <StatCard title="Active tokens" value={formatNumber(stats.activeTokens)} />
+            <StatCard title="B2 objects" value={formatNumber(stats.b2Objects)} />
             <StatCard
-              label="B2 unmirrored"
+              title="B2 unmirrored"
               value={formatNumber(stats.b2Unmirrored)}
               // Zero IS the earned state here — every published key is on the CDN — so it
               // asserts `good` rather than staying untinted.
               tone={stats.b2Unmirrored > 0 ? 'warn' : 'good'}
             />
-            <StatCard label="Rendition cache" value={formatBytes(stats.renditionCacheBytes)} />
-            <StatCard label="DB size" value={formatBytes(stats.dbSizeBytes)} />
-            <StatCard label="Last index" value={formatDateTime(stats.lastIndexAt, 'never')} />
-            <StatCard label="Version" value={stats.version} />
+            <StatCard title="Rendition cache" value={formatBytes(stats.renditionCacheBytes)} />
+            <StatCard title="DB size" value={formatBytes(stats.dbSizeBytes)} />
+            <StatCard title="Last index" value={formatDateTime(stats.lastIndexAt, 'never')} />
+            <StatCard title="Version" value={stats.version} />
           </SimpleGrid>
         )}
       </QueryState>
@@ -67,7 +67,7 @@ function ActivityPage() {
             query={indexQuery}
             errorTitle="Could not load indexer status"
             errorFallback="The indexer status endpoint did not answer."
-            variant="section"
+            tier="section"
           >
             {(status) => <IndexerSummary status={status} />}
           </QueryState>

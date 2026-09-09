@@ -1,8 +1,7 @@
 import { Badge, Group, NavLink, ScrollArea, Text } from '@mantine/core'
 import { queryOptions, useQuery } from '@tanstack/react-query'
-import { unwrap } from 'basalt-ui/query'
+import { QueryState, unwrap } from 'basalt-ui'
 import type { ReactNode } from 'react'
-import { QueryState } from 'basalt-ui'
 import { client } from '../../lib/eden'
 import { formatDateRange, formatNumber } from '../../lib/format'
 import type { ShareRoot } from '../../lib/queries/shares'
@@ -54,7 +53,7 @@ export function AlbumPicker({ root, value, onChange }: Props): ReactNode {
   return (
     <QueryState
       query={query}
-      variant="section"
+      tier="section"
       errorTitle="Could not load albums"
       empty={{
         title: 'No albums in this root',

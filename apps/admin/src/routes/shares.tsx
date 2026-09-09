@@ -2,7 +2,7 @@ import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useState, type MouseEvent, type ReactNode } from 'react'
 import { Anchor, Badge, Button, Group, Stack, Table, Text, Tooltip } from '@mantine/core'
 import { useQuery } from '@tanstack/react-query'
-import { PageActions, QueryState } from 'basalt-ui'
+import { PageBar, QueryState } from 'basalt-ui'
 import { CreateShareModal } from '../features/shares/create-share-modal'
 import { ROLE_COLOR, ROLE_LABEL, activeTokens, sortTokens } from '../features/shares/token-role'
 import { formatDate, formatNumber } from '../lib/format'
@@ -26,9 +26,11 @@ function SharesPage(): ReactNode {
 
   return (
     <Stack gap="md">
-      <PageActions>
-        <Button onClick={() => setCreateOpened(true)}>New share</Button>
-      </PageActions>
+      <PageBar
+        actions={{
+          primary: { key: 'new-share', label: 'New share', onClick: () => setCreateOpened(true) },
+        }}
+      />
 
       <QueryState
         query={query}

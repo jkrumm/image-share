@@ -15,7 +15,7 @@ import {
 import { useClipboard } from '@mantine/hooks'
 import { modals } from '@mantine/modals'
 import { DangerZone, EmptyState, QueryState } from 'basalt-ui'
-import { field, FormErrorSummary, useBasaltForm } from 'basalt-ui/forms'
+import { fieldKey, FormErrorSummary, inputProps, useBasaltForm } from 'basalt-ui/forms'
 import { notifyMutation } from '../features/common'
 import { AddTokenModal } from '../features/shares/add-token-modal'
 import { MinRatingInput } from '../features/shares/min-rating-input'
@@ -362,7 +362,7 @@ function ShareDetail({ share }: { share: ShareDetailDto }): ReactNode {
         </Accordion.Item>
       </Accordion>
 
-      <DangerZone title="Delete this share" description="This cannot be undone.">
+      <DangerZone title="Delete this share" subtitle="This cannot be undone.">
         <Button color="red" variant="outline" onClick={handleDelete}>
           Delete share
         </Button>
@@ -414,13 +414,15 @@ function ShareSettingsForm({ share }: { share: ShareDetailDto }): ReactNode {
           description="Markdown is supported"
           autosize
           minRows={2}
-          {...field(form, 'note')}
+          key={fieldKey(form, 'note')}
+          {...inputProps(form, 'note')}
         />
         <TextInput
           type="date"
           label="Expires"
           description="Empty means no expiry"
-          {...field(form, 'expiresAt')}
+          key={fieldKey(form, 'expiresAt')}
+          {...inputProps(form, 'expiresAt')}
         />
         {scoped && (
           <>

@@ -1,5 +1,5 @@
 import { queryOptions } from '@tanstack/react-query'
-import { unwrap } from 'basalt-ui/query'
+import { unwrap } from 'basalt-ui'
 import { isUnauthorizedError } from '../auth'
 import { client } from '../eden'
 

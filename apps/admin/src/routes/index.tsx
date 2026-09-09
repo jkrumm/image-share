@@ -15,7 +15,7 @@ import {
 } from '@mantine/core'
 import { useDisclosure } from '@mantine/hooks'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
-import { PageActions, QueryState } from 'basalt-ui'
+import { PageBar, QueryState } from 'basalt-ui'
 import { notifyMutation } from '../features/common'
 import { BrowsePanel } from '../features/library/browse-panel'
 import {
@@ -321,11 +321,26 @@ function LibraryPage() {
 
   return (
     <Stack gap="md">
-      <PageActions>
-        <Button size="xs" variant="default" hiddenFrom="sm" onClick={drawer.open}>
-          Albums
-        </Button>
-      </PageActions>
+      <PageBar
+        actions={{
+          secondary: [
+            {
+              key: 'albums',
+              // `custom`, not a plain BarAction: the browse panel is already in
+              // the grid above `sm`, so this trigger must stay mobile-only, and
+              // `BarAction.mobile` only places a bar action — it cannot hide one
+              // on desktop.
+              kind: 'custom',
+              node: (
+                // theme-allow control-size-literal — mobile-only drawer trigger; BarAction has no desktop-hidden lane
+                <Button variant="default" hiddenFrom="sm" onClick={drawer.open}>
+                  Albums
+                </Button>
+              ),
+            },
+          ],
+        }}
+      />
 
       <Grid gap="md">
         <Grid.Col span={{ base: 12, sm: 4, md: 3 }} visibleFrom="sm">
@@ -497,7 +512,7 @@ function LibraryPage() {
 
             <QueryState
               query={query}
-              variant="section"
+              tier="section"
               errorTitle="Could not load images"
               empty={{
                 title: 'No images match',

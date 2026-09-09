@@ -1,6 +1,6 @@
 import { skipToken, useQuery } from '@tanstack/react-query'
 import { useDebouncedValue } from '@mantine/hooks'
-import { unwrap } from 'basalt-ui/query'
+import { unwrap } from 'basalt-ui'
 import { client } from '../../lib/eden'
 import type { ShareSourceInput } from '../../lib/queries/shares'
 import { shareScopeLabel } from './share-forms'

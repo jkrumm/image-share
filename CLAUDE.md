@@ -16,12 +16,14 @@ Bun workspaces monorepo, argo-patterned (`~/SourceRoot/argo` is the canonical re
   basalt's enforcement toolchain lives in `apps/admin` (`.basalt/manifest.json`, a nested
   `.oxlintrc.json` extending the shipped preset, managed `CLAUDE.md`/`DESIGN.md`/`.claude/`).
   After a basalt bump run the LOCAL bin, never `bunx` — `bunx` serves a cached tarball and will
-  happily report a passing scan from the previous version:
-  `B=apps/admin/node_modules/.bin/basalt-ui && $B doctor && $B sync && $B check-theme && $B check-theme --audit-allows && $B check-coverage`
-  (`--version` must say what package.json pins). They relocate to `apps/admin` on their own from
-  the repo root — verified equivalent since 1.24.0, which stopped the ascend path fabricating
-  `roots: ["src"]` and scanning a fraction; `lefthook.yml` extends the shipped preset and relies
-  on that. Head colors come from `basaltAppPlugin` in `vite.config.ts`, never a
+  happily report a passing scan from the previous version — and run it **from `apps/admin`**:
+  `cd apps/admin && B=$PWD/node_modules/.bin/basalt-ui && $B doctor && $B sync && $B check-theme && $B check-theme --audit-allows`
+  (`--version` must say what package.json pins). Since 1.29.0 the CLI has ONE resolver —
+  `BASALT_CWD`, then cwd, plus a declared `basalt.roots` — and nothing is inferred from siblings
+  or parents, so the same commands run from the repo root refuse (`doctor`/`sync`) or scan zero
+  files (`check-theme`); that is why `lefthook.yml` hands the preset's root-run `check-theme` a
+  `BASALT_CWD`. `check-coverage` was dropped in the same minor (repo-internal, not a consumer
+  command). Head colors come from `basaltAppPlugin` in `vite.config.ts`, never a
   hex in `index.html`.
   Nav is one `defineNav` definition in `src/lib/nav.ts`, spread onto `BasaltShell` with `useNav` —
   never a hand-written sections array.

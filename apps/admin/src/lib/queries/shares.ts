@@ -1,5 +1,5 @@
 import { queryOptions, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { unwrap } from 'basalt-ui/query'
+import { unwrap } from 'basalt-ui'
 import { client } from '../eden'
 import type { ImageDto } from './library'
 

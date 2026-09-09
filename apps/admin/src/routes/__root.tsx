@@ -16,12 +16,10 @@ function RootLayout() {
     <BasaltShell
       brand={{ name: 'Image Share', version: __APP_VERSION__ }}
       {...nav}
-      globalActions={
-        <>
-          <NotificationBell />
-          <ThemeToggle />
-        </>
-      }
+      globalActions={[
+        { key: 'bell', node: <NotificationBell /> },
+        { key: 'theme', node: <ThemeToggle /> },
+      ]}
     >
       <Outlet />
     </BasaltShell>

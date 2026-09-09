@@ -22,7 +22,7 @@ import {
 import { useDebouncedValue } from '@mantine/hooks'
 import { modals } from '@mantine/modals'
 import { useQuery } from '@tanstack/react-query'
-import { PageActions, QueryState, StatCard } from 'basalt-ui'
+import { QueryState, StatCard } from 'basalt-ui'
 import { notifyWarning } from 'basalt-ui/notifications'
 import {
   B2SearchSchema,
@@ -199,19 +199,19 @@ function PublicPage() {
         query={summaryQuery}
         errorTitle="Could not load bucket totals"
         errorFallback="The bucket mirror could not be read."
-        variant="section"
+        tier="section"
       >
         {(summary) => (
           <SimpleGrid cols={{ base: 2, sm: 3, lg: 5 }} spacing="sm">
-            <StatCard label="Objects" value={formatNumber(summary.objects)} />
-            <StatCard label="Total size" value={formatBytes(summary.totalBytes)} />
+            <StatCard title="Objects" value={formatNumber(summary.objects)} />
+            <StatCard title="Total size" value={formatBytes(summary.totalBytes)} />
             <StatCard
-              label="Not mirrored"
+              title="Not mirrored"
               value={formatNumber(summary.unmirroredCount)}
               tone={summary.unmirroredCount > 0 ? 'warn' : 'good'}
             />
             <StatCard
-              label="Last reconcile"
+              title="Last reconcile"
               value={formatDateTime(summary.lastReconcileAt, 'never')}
             />
           </SimpleGrid>
@@ -279,57 +279,56 @@ function PublicPage() {
         </Stack>
       )}
 
-      <PageActions>
-        <Group gap="sm" wrap="wrap" align="flex-end">
-          <TextInput
-            w={260}
-            label="Search key"
-            placeholder="segeln, .webp, 2026/07"
-            value={queryInput}
-            onChange={(event) => setQueryInput(event.currentTarget.value)}
-            rightSection={
-              queryInput === '' ? null : (
-                <CloseButton
-                  size="sm"
-                  aria-label="Clear search"
-                  onClick={() => setQueryInput('')}
-                />
-              )
-            }
-          />
-          <Select
-            w={140}
-            label="Prefix"
-            data={PREFIX_OPTIONS}
-            value={search.prefix}
-            onChange={(v) => v && updateSearch({ prefix: v as B2SearchParams['prefix'], page: 1 })}
-            allowDeselect={false}
-          />
-          <Select
-            w={160}
-            label="Sort"
-            data={[
-              { value: 'lastModified', label: 'Last modified' },
-              { value: 'key', label: 'Key' },
-              { value: 'size', label: 'Size' },
-            ]}
-            value={search.sort}
-            onChange={(v) => v && updateSearch({ sort: v as B2SearchParams['sort'] })}
-            allowDeselect={false}
-          />
-          <Select
-            w={120}
-            label="Order"
-            data={[
-              { value: 'desc', label: 'Descending' },
-              { value: 'asc', label: 'Ascending' },
-            ]}
-            value={search.order}
-            onChange={(v) => v && updateSearch({ order: v as B2SearchParams['order'] })}
-            allowDeselect={false}
-          />
-        </Group>
-      </PageActions>
+      {/* Was a `PageActions` portal into the app header; `PageActions` is gone at
+          1.26.0 and its successor slot, `PageBar.filters`, takes `FilterSet`
+          controls bound to a `FieldHandle` — these four still read
+          `Route.useSearch()` and write through `navigate`, so the row renders in
+          the page flow until the b2 search params move to `createSearchStore`. */}
+      <Group gap="sm" wrap="wrap" align="flex-end">
+        <TextInput
+          w={260}
+          label="Search key"
+          placeholder="segeln, .webp, 2026/07"
+          value={queryInput}
+          onChange={(event) => setQueryInput(event.currentTarget.value)}
+          rightSection={
+            queryInput === '' ? null : (
+              <CloseButton size="sm" aria-label="Clear search" onClick={() => setQueryInput('')} />
+            )
+          }
+        />
+        <Select
+          w={140}
+          label="Prefix"
+          data={PREFIX_OPTIONS}
+          value={search.prefix}
+          onChange={(v) => v && updateSearch({ prefix: v as B2SearchParams['prefix'], page: 1 })}
+          allowDeselect={false}
+        />
+        <Select
+          w={160}
+          label="Sort"
+          data={[
+            { value: 'lastModified', label: 'Last modified' },
+            { value: 'key', label: 'Key' },
+            { value: 'size', label: 'Size' },
+          ]}
+          value={search.sort}
+          onChange={(v) => v && updateSearch({ sort: v as B2SearchParams['sort'] })}
+          allowDeselect={false}
+        />
+        <Select
+          w={120}
+          label="Order"
+          data={[
+            { value: 'desc', label: 'Descending' },
+            { value: 'asc', label: 'Ascending' },
+          ]}
+          value={search.order}
+          onChange={(v) => v && updateSearch({ order: v as B2SearchParams['order'] })}
+          allowDeselect={false}
+        />
+      </Group>
 
       {filtered && listQuery.data && (
         // The header strip stays bucket-wide, so the filtered count needs a home
