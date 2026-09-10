@@ -1,0 +1,31 @@
+# The gate this repo did not have.
+#
+# image-share deploys by hand (`make image-share-deploy` in homelab: ssh, git pull,
+# rebuild the container from a sibling clone), so nothing ran a frozen install until
+# the deploy itself did — and the deploy is the wrong place to discover that
+# `apps/admin` no longer builds. A local tree keeps packages an older install left
+# behind, so `bun run check` and a local `vite build` both pass while a clean install
+# fails. That is exactly how the missing basalt-ui peers (three @fontsource-variable
+# faces + motion) sat undetected until a container build hit them.
+#
+# Building apps/admin is the point of the last step: `check` lints, typechecks and
+# tests, and every one of those passed while the build was broken.
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      # lint + basalt theme/doctrine guards + format + typecheck + both test suites
+      - run: bun run check
+      - run: bun run --cwd apps/admin build
