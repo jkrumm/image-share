@@ -17,7 +17,7 @@ const app = new Elysia().use(shareRoutes)
 const get = (path: string): Promise<Response> => app.handle(new Request(`http://localhost${path}`))
 
 // Real fixture files under the dev-default fuji/raws roots (never a real photo
-// tree — see CLAUDE.md) so the file/raw/zip byte-serving routes have
+// tree — see AGENTS.md) so the file/raw/zip byte-serving routes have
 // something to actually read.
 const SUB = `share-routes-test-${process.pid}-${Date.now()}`
 const fujiBase = rootBaseDir('fuji')
