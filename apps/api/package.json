@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@elysiajs/cors": "^1",
-    "@elysiajs/openapi": "^1",
+    "@elysiajs/openapi": "1.4.16",
     "@elysiajs/opentelemetry": "^1.4.11",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/api-logs": "^0.222.0",
