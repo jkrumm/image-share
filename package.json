@@ -17,10 +17,10 @@
     "db:generate": "bun run --cwd apps/api db:generate"
   },
   "devDependencies": {
-    "concurrently": "^9.2.1",
-    "lefthook": "^2.1.6",
+    "concurrently": "^10.0.5",
+    "lefthook": "^2.1.14",
     "oxfmt": "^0.45.0",
-    "oxlint": "^1.60.0",
+    "oxlint": "1.74.0",
     "typescript": "^5.9.3"
   }
 }

@@ -45,7 +45,9 @@ export const telemetryConfig = {
 if (otelEnabled) {
   const loggerProvider = new LoggerProvider({
     resource,
-    processors: [new BatchLogRecordProcessor(new OTLPLogExporter({ url: `${base}/v1/logs` }))],
+    processors: [
+      new BatchLogRecordProcessor({ exporter: new OTLPLogExporter({ url: `${base}/v1/logs` }) }),
+    ],
   })
   logs.setGlobalLoggerProvider(loggerProvider)
 }
