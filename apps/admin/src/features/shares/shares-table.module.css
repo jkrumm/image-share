@@ -1,0 +1,29 @@
+/*
+ * The shares table sheds its low-value columns on its OWN width, not the viewport: below the
+ * `regular` container class the slug and source fold into a line under the title
+ * (`.compactOnly`), and the created date waits for `wide`.
+ */
+.wrap {
+  container: basalt-grid / inline-size;
+}
+
+.regular,
+.wide {
+  display: none;
+}
+
+@container basalt-grid (min-width: 480px) {
+  .regular {
+    display: table-cell;
+  }
+
+  .compactOnly {
+    display: none;
+  }
+}
+
+@container basalt-grid (min-width: 800px) {
+  .wide {
+    display: table-cell;
+  }
+}

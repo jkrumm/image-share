@@ -47,7 +47,7 @@ export function ShareImages({ images, onRemove, removing = false }: Props): Reac
         </Text>
       </Group>
 
-      <SimpleGrid cols={{ base: 3, sm: 4, md: 6, lg: 8 }} spacing="xs">
+      <SimpleGrid minColWidth={110} autoFlow="auto-fill" spacing="xs">
         {pageImages.map((image, i) => (
           <div key={image.id} style={{ position: 'relative' }}>
             {onRemove && (

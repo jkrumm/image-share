@@ -6,12 +6,19 @@ import type { B2ListParams } from '../../lib/queries/b2'
 
 export const B2_PAGE_LIMIT = 60
 
+// Shared with the filter store (./filter-store), which owns the URL write and the
+// localStorage mirror for everything but `page`; this schema stays the type the
+// pure derivations below are tested against.
+export const B2_PREFIXES = ['all', 'fuji', 'blog', 'gen', 'misc'] as const
+export const B2_SORTS = ['lastModified', 'key', 'size'] as const
+export const B2_ORDERS = ['desc', 'asc'] as const
+
 export const B2SearchSchema = z.object({
-  prefix: z.enum(['all', 'fuji', 'blog', 'gen', 'misc']).default('all'),
+  prefix: z.enum(B2_PREFIXES).default('all'),
   q: z.string().default(''),
   page: z.number().int().min(1).default(1),
-  sort: z.enum(['lastModified', 'key', 'size']).default('lastModified'),
-  order: z.enum(['asc', 'desc']).default('desc'),
+  sort: z.enum(B2_SORTS).default('lastModified'),
+  order: z.enum(B2_ORDERS).default('desc'),
 })
 
 export type B2SearchParams = z.infer<typeof B2SearchSchema>

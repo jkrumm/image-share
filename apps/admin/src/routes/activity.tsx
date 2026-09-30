@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { Button, Group, SimpleGrid, Stack, Text } from '@mantine/core'
+import { Button, Group, Stack, Text } from '@mantine/core'
 import { useQuery } from '@tanstack/react-query'
-import { QueryState, StatCard } from 'basalt-ui'
+import { QueryState, StatCard, StatGroup } from 'basalt-ui'
 import { notifyMutation } from '../features/common'
 import { formatBytes, formatDateTime, formatNumber, formatRelative } from '../lib/format'
 import { activityQueries, useTriggerRescan, type IndexStatusDto } from '../lib/queries/activity'
@@ -35,7 +35,7 @@ function ActivityPage() {
         tier="section"
       >
         {(stats) => (
-          <SimpleGrid cols={{ base: 2, sm: 3, lg: 6 }} spacing="sm">
+          <StatGroup cols={4}>
             <StatCard title="Images" value={formatNumber(stats.images)} />
             <StatCard title="JPEGs" value={formatNumber(stats.jpegs)} />
             <StatCard title="RAWs" value={formatNumber(stats.raws)} />
@@ -54,7 +54,7 @@ function ActivityPage() {
             <StatCard title="DB size" value={formatBytes(stats.dbSizeBytes)} />
             <StatCard title="Last index" value={formatDateTime(stats.lastIndexAt, 'never')} />
             <StatCard title="Version" value={stats.version} />
-          </SimpleGrid>
+          </StatGroup>
         )}
       </QueryState>
 

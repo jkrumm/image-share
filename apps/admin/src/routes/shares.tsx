@@ -7,6 +7,7 @@ import { CreateShareModal } from '../features/shares/create-share-modal'
 import { ROLE_COLOR, ROLE_LABEL, activeTokens, sortTokens } from '../features/shares/token-role'
 import { formatDate, formatNumber } from '../lib/format'
 import { sharesQueries, type ShareDto } from '../lib/queries/shares'
+import classes from '../features/shares/shares-table.module.css'
 
 export const Route = createFileRoute('/shares')({
   component: SharesPage,
@@ -53,19 +54,19 @@ function SharesPage(): ReactNode {
 function SharesTable({ shares }: { shares: ShareDto[] }): ReactNode {
   const navigate = useNavigate()
 
-  // 480 rather than 800: the low-value columns collapse below `sm` instead of
-  // forcing every phone into a horizontal scroll on the whole table.
+  // The low-value columns fold on the table's OWN width (shares-table.module.css)
+  // instead of forcing every phone into a horizontal scroll on the whole table.
   return (
-    <Table.ScrollContainer minWidth={480}>
+    <div className={classes.wrap}>
       <Table striped highlightOnHover verticalSpacing="sm">
         <Table.Thead>
           <Table.Tr>
             <Table.Th>Title</Table.Th>
-            <Table.Th visibleFrom="sm">Slug</Table.Th>
-            <Table.Th visibleFrom="sm">Source</Table.Th>
+            <Table.Th className={classes.regular}>Slug</Table.Th>
+            <Table.Th className={classes.regular}>Source</Table.Th>
             <Table.Th>Images</Table.Th>
             <Table.Th>Links</Table.Th>
-            <Table.Th visibleFrom="md">Created</Table.Th>
+            <Table.Th className={classes.wide}>Created</Table.Th>
           </Table.Tr>
         </Table.Thead>
         <Table.Tbody>
@@ -92,16 +93,16 @@ function SharesTable({ shares }: { shares: ShareDto[] }): ReactNode {
                   >
                     {share.title}
                   </Anchor>
-                  <Text size="xs" c="dimmed" hiddenFrom="sm">
+                  <Text size="xs" c="dimmed" className={classes.compactOnly}>
                     {share.slug} · {sourceLabel(share)}
                   </Text>
                 </Table.Td>
-                <Table.Td visibleFrom="sm">
+                <Table.Td className={classes.regular}>
                   <Text size="sm" ff="monospace" c="dimmed">
                     {share.slug}
                   </Text>
                 </Table.Td>
-                <Table.Td visibleFrom="sm">
+                <Table.Td className={classes.regular}>
                   <Text size="sm" c="dimmed">
                     {sourceLabel(share)}
                   </Text>
@@ -129,7 +130,7 @@ function SharesTable({ shares }: { shares: ShareDto[] }): ReactNode {
                     </Group>
                   )}
                 </Table.Td>
-                <Table.Td visibleFrom="md">
+                <Table.Td className={classes.wide}>
                   <Text size="xs" c="dimmed">
                     {formatDate(share.createdAt)}
                   </Text>
@@ -139,6 +140,6 @@ function SharesTable({ shares }: { shares: ShareDto[] }): ReactNode {
           })}
         </Table.Tbody>
       </Table>
-    </Table.ScrollContainer>
+    </div>
   )
 }

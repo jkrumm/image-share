@@ -8,6 +8,12 @@ import type { ShareRoot, ShareSourceInput } from '../../lib/queries/shares'
 
 export const LIBRARY_PAGE_LIMIT = 60
 
+// Shared with the view store (./view-store), which owns the URL write and the
+// localStorage mirror for these two; the schema keeps them so every derivation
+// below is still tested against one parsed shape.
+export const LIBRARY_SORTS = ['captureAt', 'name'] as const
+export const LIBRARY_ORDERS = ['desc', 'asc'] as const
+
 export const LibrarySearchSchema = z.object({
   // Defaulted, not optional: an undefined root fetched across ALL roots, so the
   // first paint of the page pulled RAF rows into a grid that can never render
@@ -25,8 +31,8 @@ export const LibrarySearchSchema = z.object({
   captureTo: z.string().optional(),
   stem: z.string().optional(),
   page: z.number().int().min(1).default(1),
-  sort: z.enum(['captureAt', 'name']).default('captureAt'),
-  order: z.enum(['asc', 'desc']).default('desc'),
+  sort: z.enum(LIBRARY_SORTS).default('captureAt'),
+  order: z.enum(LIBRARY_ORDERS).default('desc'),
 })
 
 export type LibrarySearchParams = z.infer<typeof LibrarySearchSchema>

@@ -5,7 +5,6 @@ import {
   Badge,
   Button,
   Center,
-  CloseButton,
   CopyButton,
   FileButton,
   Group,
@@ -19,11 +18,13 @@ import {
   Text,
   TextInput,
 } from '@mantine/core'
-import { useDebouncedValue } from '@mantine/hooks'
 import { modals } from '@mantine/modals'
 import { useQuery } from '@tanstack/react-query'
-import { QueryState, StatCard } from 'basalt-ui'
+import { PageBar, QueryState, StatCard, StatGroup } from 'basalt-ui'
+import { FilterSet, SearchFilter, SelectFilter } from 'basalt-ui/controls'
+import { FormGroup } from 'basalt-ui/forms'
 import { notifyWarning } from 'basalt-ui/notifications'
+import { b2Filters } from '../features/b2/filter-store'
 import {
   B2SearchSchema,
   B2_PAGE_LIMIT,
@@ -45,18 +46,14 @@ import {
 
 const LIMIT = B2_PAGE_LIMIT
 
-const PREFIX_OPTIONS = [
-  { value: 'all', label: 'All' },
-  { value: 'fuji', label: 'Fuji' },
-  { value: 'blog', label: 'Blog' },
-  { value: 'gen', label: 'Generated' },
-  { value: 'misc', label: 'Misc' },
-]
-
-const UPLOAD_PREFIX_OPTIONS = PREFIX_OPTIONS.filter((o) => o.value !== 'all')
+const UPLOAD_PREFIX_OPTIONS = b2Filters.field.prefix.options.filter((o) => o.value !== 'all')
 
 export const Route = createFileRoute('/public')({
-  validateSearch: (raw: Record<string, unknown>) => B2SearchSchema.parse(raw),
+  // The store owns every filter param (URL ⊳ localStorage ⊳ fallback); the schema keeps `page`.
+  validateSearch: (raw: Record<string, unknown>) => ({
+    ...B2SearchSchema.parse(raw),
+    ...b2Filters.validateSearch(raw),
+  }),
   component: PublicPage,
 })
 
@@ -69,30 +66,17 @@ function PublicPage() {
   const [uploadSubdir, setUploadSubdir] = useState('')
   const [upload, setUpload] = useState<UploadState | null>(null)
 
-  // The key filter is typed, so it debounces into the URL instead of firing a
-  // request per keystroke against 180+ objects. `lastSyncedQuery` is what the
-  // box and the URL last agreed on — without it the two effects below fight
-  // each other and a browser Back out of a search immediately re-applies it.
-  const [queryInput, setQueryInput] = useState(search.q)
-  const [debouncedQuery] = useDebouncedValue(queryInput, 300)
-  const lastSyncedQuery = useRef(search.q)
-
+  // A bound filter writes only its own param, so narrowing the set would leave
+  // `page` pointing past the end of it. Reset it here, once per filter change —
+  // sort/order keep the page, as they always did.
+  const filterKey = JSON.stringify([search.prefix, search.q])
+  const lastFilterKey = useRef(filterKey)
   useEffect(() => {
-    if (debouncedQuery === lastSyncedQuery.current) return
-    lastSyncedQuery.current = debouncedQuery
-    // `replace` so a typed word doesn't leave one history entry per character.
-    void navigate({
-      search: (prev: B2SearchParams) => ({ ...prev, q: debouncedQuery, page: 1 }),
-      replace: true,
-    })
-  }, [debouncedQuery, navigate])
-
-  useEffect(() => {
-    // The URL moved on its own (Back/Forward, a pasted link) — follow it.
-    if (search.q === lastSyncedQuery.current) return
-    lastSyncedQuery.current = search.q
-    setQueryInput(search.q)
-  }, [search.q])
+    if (filterKey === lastFilterKey.current) return
+    lastFilterKey.current = filterKey
+    if (search.page === 1) return
+    void navigate({ search: (prev: B2SearchParams) => ({ ...prev, page: 1 }), replace: true })
+  }, [filterKey, search.page, navigate])
 
   const listQuery = useQuery(b2Queries.list(toB2ListParams(search, LIMIT)))
   // Deliberately a second, unfiltered query: design §12 wants the header strip
@@ -195,6 +179,21 @@ function PublicPage() {
 
   return (
     <Stack gap="lg">
+      <PageBar
+        filters={
+          <FilterSet>
+            <SearchFilter
+              field={b2Filters.field.q}
+              label="Search key"
+              placeholder="segeln, .webp, 2026/07"
+            />
+            <SelectFilter field={b2Filters.field.prefix} label="Prefix" />
+            <SelectFilter field={b2Filters.field.sort} label="Sort" />
+            <SelectFilter field={b2Filters.field.order} label="Order" />
+          </FilterSet>
+        }
+      />
+
       <QueryState
         query={summaryQuery}
         errorTitle="Could not load bucket totals"
@@ -202,7 +201,7 @@ function PublicPage() {
         tier="section"
       >
         {(summary) => (
-          <SimpleGrid cols={{ base: 2, sm: 3, lg: 5 }} spacing="sm">
+          <StatGroup cols={4}>
             <StatCard title="Objects" value={formatNumber(summary.objects)} />
             <StatCard title="Total size" value={formatBytes(summary.totalBytes)} />
             <StatCard
@@ -214,32 +213,36 @@ function PublicPage() {
               title="Last reconcile"
               value={formatDateTime(summary.lastReconcileAt, 'never')}
             />
-          </SimpleGrid>
+          </StatGroup>
         )}
       </QueryState>
 
       <Group justify="space-between" wrap="wrap" align="flex-end">
-        <Group gap="xs" align="flex-end">
-          <Select
-            w={140}
-            label="Prefix"
-            data={UPLOAD_PREFIX_OPTIONS}
-            value={uploadPrefix}
-            onChange={(v) => v && setUploadPrefix(v as B2Prefix)}
-            allowDeselect={false}
-          />
-          <TextInput
-            w={220}
-            label="Sub-directory (optional)"
-            description="Nested under img/<prefix>/"
-            placeholder="2026/07/trip"
-            value={uploadSubdir}
-            onChange={(event) => setUploadSubdir(event.currentTarget.value)}
-          />
-          <FileButton onChange={(files) => void handleUpload(files)} multiple accept="image/*">
-            {(props) => <Button {...props}>Upload to CDN…</Button>}
-          </FileButton>
-        </Group>
+        {/* The upload target is a form, not a page filter — its home is a form row. */}
+        <FormGroup label="Upload to CDN">
+          <Group gap="xs" align="flex-end" wrap="wrap">
+            {/* theme-allow raw-selection-control — upload target inside a basalt-ui/forms FormGroup; the AST rule (control-outside-home) sees the home, the text lane cannot */}
+            <Select
+              w={140}
+              label="Prefix"
+              data={UPLOAD_PREFIX_OPTIONS}
+              value={uploadPrefix}
+              onChange={(v) => v && setUploadPrefix(v as B2Prefix)}
+              allowDeselect={false}
+            />
+            <TextInput
+              w={220}
+              label="Sub-directory (optional)"
+              description="Nested under img/<prefix>/"
+              placeholder="2026/07/trip"
+              value={uploadSubdir}
+              onChange={(event) => setUploadSubdir(event.currentTarget.value)}
+            />
+            <FileButton onChange={(files) => void handleUpload(files)} multiple accept="image/*">
+              {(props) => <Button {...props}>Upload to CDN…</Button>}
+            </FileButton>
+          </Group>
+        </FormGroup>
         <Group gap="xs">
           <Button
             size="xs"
@@ -279,57 +282,6 @@ function PublicPage() {
         </Stack>
       )}
 
-      {/* Was a `PageActions` portal into the app header; `PageActions` is gone at
-          1.26.0 and its successor slot, `PageBar.filters`, takes `FilterSet`
-          controls bound to a `FieldHandle` — these four still read
-          `Route.useSearch()` and write through `navigate`, so the row renders in
-          the page flow until the b2 search params move to `createSearchStore`. */}
-      <Group gap="sm" wrap="wrap" align="flex-end">
-        <TextInput
-          w={260}
-          label="Search key"
-          placeholder="segeln, .webp, 2026/07"
-          value={queryInput}
-          onChange={(event) => setQueryInput(event.currentTarget.value)}
-          rightSection={
-            queryInput === '' ? null : (
-              <CloseButton size="sm" aria-label="Clear search" onClick={() => setQueryInput('')} />
-            )
-          }
-        />
-        <Select
-          w={140}
-          label="Prefix"
-          data={PREFIX_OPTIONS}
-          value={search.prefix}
-          onChange={(v) => v && updateSearch({ prefix: v as B2SearchParams['prefix'], page: 1 })}
-          allowDeselect={false}
-        />
-        <Select
-          w={160}
-          label="Sort"
-          data={[
-            { value: 'lastModified', label: 'Last modified' },
-            { value: 'key', label: 'Key' },
-            { value: 'size', label: 'Size' },
-          ]}
-          value={search.sort}
-          onChange={(v) => v && updateSearch({ sort: v as B2SearchParams['sort'] })}
-          allowDeselect={false}
-        />
-        <Select
-          w={120}
-          label="Order"
-          data={[
-            { value: 'desc', label: 'Descending' },
-            { value: 'asc', label: 'Ascending' },
-          ]}
-          value={search.order}
-          onChange={(v) => v && updateSearch({ order: v as B2SearchParams['order'] })}
-          allowDeselect={false}
-        />
-      </Group>
-
       {filtered && listQuery.data && (
         // The header strip stays bucket-wide, so the filtered count needs a home
         // of its own — otherwise a prefix filter silently has no visible effect
@@ -358,7 +310,9 @@ function PublicPage() {
         isEmpty={(data) => data.data.length === 0}
       >
         {(data) => (
-          <SimpleGrid cols={{ base: 2, sm: 3, md: 4, lg: 5 }} spacing="md">
+          // Auto-fill on a tile floor: the column count follows the width the grid
+          // actually has, with no breakpoint to key at all.
+          <SimpleGrid minColWidth={180} autoFlow="auto-fill" spacing="md">
             {data.data.map((obj) => (
               <B2Tile key={obj.key} obj={obj} onDelete={() => handleDelete(obj)} />
             ))}

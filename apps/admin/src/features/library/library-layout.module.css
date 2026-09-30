@@ -1,0 +1,39 @@
+/*
+ * The Library's browse panel sits beside the grid only once the page's OWN content column can
+ * hold both — keyed on that column's width (the `wide` container class), not the viewport, so the
+ * shell sidebar opening or folding moves the boundary with it. Below it the panel lives in a
+ * drawer, and `.drawerTrigger` is its narrow twin on the same boundary: one of the two is always
+ * shown, never both and never neither.
+ */
+.layout {
+  container: basalt-grid / inline-size;
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--mantine-spacing-md);
+  align-items: start;
+}
+
+.side {
+  display: none;
+  position: sticky;
+  top: 12px;
+  padding-right: var(--mantine-spacing-sm);
+  border-right: 1px solid var(--mantine-color-default-border);
+}
+
+@container basalt-grid (min-width: 800px) {
+  .columns {
+    grid-template-columns: minmax(220px, 1fr) minmax(0, 3fr);
+  }
+
+  .side {
+    display: block;
+  }
+
+  .drawerTrigger {
+    display: none;
+  }
+}

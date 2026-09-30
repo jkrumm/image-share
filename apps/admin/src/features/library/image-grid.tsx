@@ -33,7 +33,8 @@ type Props = {
 export function ImageGrid({ images, selection, onToggle, onOpen, stale = false }: Props) {
   return (
     <SimpleGrid
-      cols={{ base: 2, xs: 3, sm: 3, md: 4, lg: 6 }}
+      minColWidth={150}
+      autoFlow="auto-fill"
       spacing="xs"
       style={{ opacity: stale ? 0.55 : 1, transition: 'opacity 120ms ease' }}
     >

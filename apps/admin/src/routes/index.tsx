@@ -5,7 +5,6 @@ import {
   Box,
   Button,
   Drawer,
-  Grid,
   Group,
   Pagination,
   Paper,
@@ -16,6 +15,7 @@ import {
 import { useDisclosure } from '@mantine/hooks'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { PageBar, QueryState } from 'basalt-ui'
+import { FilterSet, SelectFilter } from 'basalt-ui/controls'
 import { notifyMutation } from '../features/common'
 import { BrowsePanel } from '../features/library/browse-panel'
 import {
@@ -24,6 +24,7 @@ import {
   type FilterPatch,
 } from '../features/library/filter-bar'
 import { ImageGrid } from '../features/library/image-grid'
+import classes from '../features/library/library-layout.module.css'
 import { Lightbox } from '../features/library/lightbox'
 import { PublishModal } from '../features/library/publish-modal'
 import { SelectionModal } from '../features/library/selection-modal'
@@ -47,6 +48,7 @@ import {
   toImagesParams,
   type LibrarySearchParams,
 } from '../features/library/search-params'
+import { libraryView } from '../features/library/view-store'
 import { CreateShareModal } from '../features/shares/create-share-modal'
 import { formatNumber } from '../lib/format'
 import {
@@ -60,7 +62,11 @@ import type { ShareSourceInput } from '../lib/queries/shares'
 const LIMIT = LIBRARY_PAGE_LIMIT
 
 export const Route = createFileRoute('/')({
-  validateSearch: (raw: Record<string, unknown>) => LibrarySearchSchema.parse(raw),
+  // The store owns sort/order (URL ⊳ localStorage ⊳ fallback); the schema keeps the rest.
+  validateSearch: (raw: Record<string, unknown>) => ({
+    ...LibrarySearchSchema.parse(raw),
+    ...libraryView.validateSearch(raw),
+  }),
   component: LibraryPage,
 })
 
@@ -118,6 +124,16 @@ function LibraryPage() {
     },
     [navigate, search],
   )
+
+  // The bound sort/order selects write only their own params; a reorder used to
+  // land on page 1 through `applyFilter`, and still does through this.
+  const viewKey = `${search.sort}:${search.order}`
+  const lastViewKey = useRef(viewKey)
+  useEffect(() => {
+    if (viewKey === lastViewKey.current) return
+    lastViewKey.current = viewKey
+    if (search.page !== 1) updateSearch({ page: 1 }, { replace: true })
+  }, [viewKey, search.page, updateSearch])
 
   // ── Selection plumbing ─────────────────────────────────────────────────────
 
@@ -322,42 +338,31 @@ function LibraryPage() {
   return (
     <Stack gap="md">
       <PageBar
-        actions={{
-          secondary: [
-            {
-              key: 'albums',
-              // `custom`, not a plain BarAction: the browse panel is already in
-              // the grid above `sm`, so this trigger must stay mobile-only, and
-              // `BarAction.mobile` only places a bar action — it cannot hide one
-              // on desktop.
-              kind: 'custom',
-              node: (
-                // theme-allow control-size-literal — mobile-only drawer trigger; BarAction has no desktop-hidden lane
-                <Button variant="default" hiddenFrom="sm" onClick={drawer.open}>
-                  Albums
-                </Button>
-              ),
-            },
-          ],
-        }}
+        filters={
+          <FilterSet>
+            <SelectFilter field={libraryView.field.sort} label="Sort" />
+            <SelectFilter field={libraryView.field.order} label="Order" />
+          </FilterSet>
+        }
       />
 
-      <Grid gap="md">
-        <Grid.Col span={{ base: 12, sm: 4, md: 3 }} visibleFrom="sm">
-          <Box
-            pos="sticky"
-            top={12}
-            pr="sm"
-            style={{ borderRight: '1px solid var(--mantine-color-default-border)' }}
-          >
+      <div className={classes.layout}>
+        <div className={classes.columns}>
+          <Box className={classes.side}>
             <ScrollArea.Autosize mah="calc(100dvh - 160px)" type="hover">
               {browsePanel}
             </ScrollArea.Autosize>
           </Box>
-        </Grid.Col>
 
-        <Grid.Col span={{ base: 12, sm: 8, md: 9 }}>
           <Stack gap="md">
+            {/* The panel's narrow twin: shown exactly while `.side` is hidden, on the
+                same container boundary, so one of the two is always reachable. */}
+            <Box className={classes.drawerTrigger}>
+              <Button size="xs" variant="default" onClick={drawer.open}>
+                Albums
+              </Button>
+            </Box>
+
             <FilterBar
               axis={axis}
               minRating={search.minRating}
@@ -365,8 +370,6 @@ function LibraryPage() {
               captureFrom={search.captureFrom}
               captureTo={search.captureTo}
               stem={search.stem}
-              sort={search.sort}
-              order={search.order}
               onChange={applyFilter}
             />
 
@@ -546,8 +549,8 @@ function LibraryPage() {
               </Group>
             )}
           </Stack>
-        </Grid.Col>
-      </Grid>
+        </div>
+      </div>
 
       <Drawer opened={drawerOpened} onClose={drawer.close} title="Browse" size="sm" padding="md">
         {browsePanel}

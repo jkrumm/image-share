@@ -1,7 +1,6 @@
-import { Button, Checkbox, CloseButton, Group, Menu, Select, TextInput } from '@mantine/core'
+import { Button, Checkbox, CloseButton, Group, Menu, TextInput } from '@mantine/core'
 import { useDebouncedValue } from '@mantine/hooks'
 import { useEffect, useRef, useState } from 'react'
-import type { LibraryOrder, LibrarySort } from '../../lib/queries/library'
 import { MinRatingInput } from '../shares/min-rating-input'
 import { DATE_PRESETS } from './date-presets'
 import { pushStemUp, syncStemDown } from './stem-sync'
@@ -12,8 +11,6 @@ export type FilterValue = {
   captureFrom: string | undefined
   captureTo: string | undefined
   stem: string | undefined
-  sort: LibrarySort
-  order: LibraryOrder
 }
 
 export type FilterPatch = Partial<FilterValue>
@@ -45,8 +42,6 @@ export function FilterBar({
   captureFrom,
   captureTo,
   stem,
-  sort,
-  order,
   axis,
   onChange,
 }: Props) {
@@ -87,7 +82,7 @@ export function FilterBar({
     <Group gap="sm" wrap="wrap" align="flex-end">
       <TextInput
         size="xs"
-        w={{ base: '100%', xs: 200 }}
+        w={200}
         label="Filename"
         placeholder="DSCF1234"
         value={stemDraft}
@@ -106,7 +101,7 @@ export function FilterBar({
       <TextInput
         size="xs"
         type="date"
-        w={{ base: 'calc(50% - var(--mantine-spacing-sm) / 2)', xs: 150 }}
+        w={150}
         label="From"
         value={captureFrom ?? ''}
         onChange={(event) => onChange({ captureFrom: event.currentTarget.value || undefined })}
@@ -114,7 +109,7 @@ export function FilterBar({
       <TextInput
         size="xs"
         type="date"
-        w={{ base: 'calc(50% - var(--mantine-spacing-sm) / 2)', xs: 150 }}
+        w={150}
         label="To"
         value={captureTo ?? ''}
         onChange={(event) => onChange({ captureTo: event.currentTarget.value || undefined })}
@@ -154,31 +149,6 @@ export function FilterBar({
         disabled={axis === 'none'}
         checked={recursive}
         onChange={(event) => onChange({ recursive: event.currentTarget.checked })}
-      />
-
-      <Select
-        size="xs"
-        w={140}
-        label="Sort"
-        data={[
-          { value: 'captureAt', label: 'Capture date' },
-          { value: 'name', label: 'Name' },
-        ]}
-        value={sort}
-        onChange={(value) => value && onChange({ sort: value as LibrarySort })}
-        allowDeselect={false}
-      />
-      <Select
-        size="xs"
-        w={110}
-        label="Order"
-        data={[
-          { value: 'desc', label: 'Newest' },
-          { value: 'asc', label: 'Oldest' },
-        ]}
-        value={order}
-        onChange={(value) => value && onChange({ order: value as LibraryOrder })}
-        allowDeselect={false}
       />
     </Group>
   )

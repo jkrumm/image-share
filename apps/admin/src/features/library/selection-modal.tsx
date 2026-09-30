@@ -47,7 +47,7 @@ export function SelectionModal({ opened, onClose, images, onRemove, onClear }: P
           these were picked on. The toolbar’s sort changes how you browse, never how a share reads.
         </Text>
 
-        <SimpleGrid cols={{ base: 3, sm: 5, md: 7 }} spacing="xs">
+        <SimpleGrid minColWidth={96} autoFlow="auto-fill" spacing="xs">
           {images.map((image, index) => (
             <Box key={image.id} pos="relative">
               <Badge

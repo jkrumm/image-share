@@ -1,7 +1,9 @@
 import { linkOptions } from '@tanstack/react-router'
 import { defineNav, navGroup } from 'basalt-ui/router-tanstack'
+import { b2Filters } from '../features/b2/filter-store'
 import { B2SearchSchema } from '../features/b2/search-params'
 import { LibrarySearchSchema } from '../features/library/search-params'
+import { libraryView } from '../features/library/view-store'
 
 /**
  * The single navigation definition — it drives the desktop sidebar AND the mobile bar.
@@ -29,15 +31,22 @@ export const NAV = defineNav({
         // Both schemas have a default for every key, so `parse({})` IS the landing state. It is a
         // click-time thunk rather than a module-scope object so a long-lived tab never pins a
         // stale default, and so the router sees the required search params it asks for — the old
-        // hand-rolled nav hid that requirement behind a `to={… as never}` cast.
-        link: linkOptions({ to: '/', search: () => LibrarySearchSchema.parse({}) }),
+        // hand-rolled nav hid that requirement behind a `to={… as never}` cast. The store's
+        // `linkSearch` spreads over it, so a click restores the last sort instead of the fallback.
+        link: linkOptions({
+          to: '/',
+          search: () => ({ ...LibrarySearchSchema.parse({}), ...libraryView.linkSearch() }),
+        }),
       },
       {
         id: 'public',
         label: 'Public (CDN)',
         short: 'Public',
         mobile: 'tab',
-        link: linkOptions({ to: '/public', search: () => B2SearchSchema.parse({}) }),
+        link: linkOptions({
+          to: '/public',
+          search: () => ({ ...B2SearchSchema.parse({}), ...b2Filters.linkSearch() }),
+        }),
       },
       {
         id: 'shares',
