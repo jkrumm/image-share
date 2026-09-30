@@ -221,7 +221,6 @@ function PublicPage() {
         {/* The upload target is a form, not a page filter — its home is a form row. */}
         <FormGroup label="Upload to CDN">
           <Group gap="xs" align="flex-end" wrap="wrap">
-            {/* theme-allow raw-selection-control — upload target inside a basalt-ui/forms FormGroup; the AST rule (control-outside-home) sees the home, the text lane cannot */}
             <Select
               w={140}
               label="Prefix"
