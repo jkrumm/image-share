@@ -21,8 +21,7 @@ import {
 import { modals } from '@mantine/modals'
 import { useQuery } from '@tanstack/react-query'
 import { PageBar, QueryState, StatCard, StatGroup } from 'basalt-ui'
-import { FilterSet, SearchFilter, SelectFilter } from 'basalt-ui/controls'
-import { FormGroup } from 'basalt-ui/forms'
+import { FilterSet, FormGroup, SearchFilter, SelectFilter } from 'basalt-ui/controls'
 import { notifyWarning } from 'basalt-ui/notifications'
 import { b2Filters } from '../features/b2/filter-store'
 import {
@@ -207,28 +206,26 @@ function PublicPage() {
 
       <Group justify="space-between" wrap="wrap" align="flex-end">
         {/* The upload target is a form, not a page filter — its home is a form row. */}
-        <FormGroup label="Upload to CDN">
-          <Group gap="xs" align="flex-end" wrap="wrap">
-            <Select
-              w={140}
-              label="Prefix"
-              data={UPLOAD_PREFIX_OPTIONS}
-              value={uploadPrefix}
-              onChange={(v) => v && setUploadPrefix(v as B2Prefix)}
-              allowDeselect={false}
-            />
-            <TextInput
-              w={220}
-              label="Sub-directory (optional)"
-              description="Nested under img/<prefix>/"
-              placeholder="2026/07/trip"
-              value={uploadSubdir}
-              onChange={(event) => setUploadSubdir(event.currentTarget.value)}
-            />
-            <FileButton onChange={(files) => void handleUpload(files)} multiple accept="image/*">
-              {(props) => <Button {...props}>Upload to CDN…</Button>}
-            </FileButton>
-          </Group>
+        <FormGroup label="Upload to CDN" direction="row">
+          <Select
+            w={140}
+            label="Prefix"
+            data={UPLOAD_PREFIX_OPTIONS}
+            value={uploadPrefix}
+            onChange={(v) => v && setUploadPrefix(v as B2Prefix)}
+            allowDeselect={false}
+          />
+          <TextInput
+            w={220}
+            label="Sub-directory (optional)"
+            description="Nested under img/<prefix>/"
+            placeholder="2026/07/trip"
+            value={uploadSubdir}
+            onChange={(event) => setUploadSubdir(event.currentTarget.value)}
+          />
+          <FileButton onChange={(files) => void handleUpload(files)} multiple accept="image/*">
+            {(props) => <Button {...props}>Upload to CDN…</Button>}
+          </FileButton>
         </FormGroup>
         <Group gap="xs">
           <Button
