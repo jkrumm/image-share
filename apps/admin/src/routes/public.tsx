@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import {
   AspectRatio,
   Badge,
@@ -65,18 +65,6 @@ function PublicPage() {
   const [uploadPrefix, setUploadPrefix] = useState<B2Prefix>('misc')
   const [uploadSubdir, setUploadSubdir] = useState('')
   const [upload, setUpload] = useState<UploadState | null>(null)
-
-  // A bound filter writes only its own param, so narrowing the set would leave
-  // `page` pointing past the end of it. Reset it here, once per filter change —
-  // sort/order keep the page, as they always did.
-  const filterKey = JSON.stringify([search.prefix, search.q])
-  const lastFilterKey = useRef(filterKey)
-  useEffect(() => {
-    if (filterKey === lastFilterKey.current) return
-    lastFilterKey.current = filterKey
-    if (search.page === 1) return
-    void navigate({ search: (prev: B2SearchParams) => ({ ...prev, page: 1 }), replace: true })
-  }, [filterKey, search.page, navigate])
 
   const listQuery = useQuery(b2Queries.list(toB2ListParams(search, LIMIT)))
   // Deliberately a second, unfiltered query: design §12 wants the header strip

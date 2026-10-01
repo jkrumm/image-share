@@ -125,16 +125,6 @@ function LibraryPage() {
     [navigate, search],
   )
 
-  // The bound sort/order selects write only their own params; a reorder used to
-  // land on page 1 through `applyFilter`, and still does through this.
-  const viewKey = `${search.sort}:${search.order}`
-  const lastViewKey = useRef(viewKey)
-  useEffect(() => {
-    if (viewKey === lastViewKey.current) return
-    lastViewKey.current = viewKey
-    if (search.page !== 1) updateSearch({ page: 1 }, { replace: true })
-  }, [viewKey, search.page, updateSearch])
-
   // ── Selection plumbing ─────────────────────────────────────────────────────
 
   const commit = useCallback(

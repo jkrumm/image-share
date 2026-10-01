@@ -13,6 +13,8 @@ export const libraryView = createSearchStore({
     sort: field.enum(LIBRARY_SORTS, 'captureAt'),
     order: field.enum(LIBRARY_ORDERS, 'desc'),
   },
+  // A reorder lands on page 1, as every Library filter write does.
+  resets: ['page'],
 }).labels({
   sort: { captureAt: 'Capture date', name: 'Name' },
   order: { desc: 'Newest', asc: 'Oldest' },
