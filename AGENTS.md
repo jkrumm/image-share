@@ -28,19 +28,42 @@ Bun workspaces monorepo, argo-patterned (`~/SourceRoot/argo` is the canonical re
   Nav is one `defineNav` definition in `src/lib/nav.ts`, spread onto `BasaltShell` with `useNav` —
   never a hand-written sections array.
 
-## Commands
+## Validate
 
-- `bun run check` — oxlint + format check + typecheck both apps + tests (run before commit)
-- `bun test --cwd apps/api` — API tests (fixtures are generated; never touch real photo trees)
+- `bun run check` — lint (`oxlint` + basalt `check-theme`/`sync --check`) + `format:check` +
+  typecheck both apps + both test suites. The gate before every commit; `make check` is the same
+  command. CI (`.github/workflows/check.yml`) runs this on PRs and pushes to `master` and then
+  additionally runs `bun run --cwd apps/admin build` — that extra step exists because
+  `bun run check` once passed while the admin build was broken (missing basalt-ui peers).
+- `bun test --cwd apps/api` — API tests (fixtures are generated; never touch real photo trees).
 - `bun test --cwd apps/admin` — admin tests. `bun:test` only, no DOM renderer and no test
   dependency: pure logic is extracted into modules (`features/*/search-params.ts`,
   `selection.ts`, `share-forms.ts`, …) and tested there. A module a test imports must not
   touch `window`/`import.meta.env` at load. `src/bun-test.d.ts` type-references bun-types'
   `test.d.ts` alone, so Bun's globals never reach the browser program.
-- `bun run --cwd apps/api db:generate` — drizzle migration after schema edits (commit `drizzle/`)
-- `./scripts/dev.sh` — local dev (api :7720, admin :7721), local data under `.dev/`
+- `bun run --cwd apps/api db:generate` — drizzle migration after schema edits (commit `drizzle/`).
+- `./scripts/dev.sh` — local dev (api :7720, admin :7721), local data under `.dev/`.
 
-## Rules
+## Deploy
+
+- **No CI or RollHook deploy.** `.github/workflows/check.yml` only validates on push to `master`.
+  Deployment lives in `~/SourceRoot/homelab` (compose, Caddyfile, monitors, Makefile targets); the
+  Dockerfile is owned here at `apps/api/Dockerfile` (build context = repo root). `make deploy`
+  aliases the homelab target: `$(MAKE) -C ../homelab image-share-deploy` (ssh, `git pull`, rebuild
+  the container from a sibling clone at `/home/jkrumm/image-share`).
+
+## Verify & Monitor
+
+- Health URL: `https://share.jkrumm.com/health` — Caddy routes `/health` straight to the API
+  (`GET /health`, no DB). `make verify` curls it with `curl -fsS`; exit 0 means live and healthy.
+- Uptime Kuma monitors (group `Image Share`): `Image Share - HTTP` and `Image Share - Docker`. The
+  service also pings a Kuma push heartbeat at the end of a successful reverse-backup
+  (`UPTIME_KUMA_PUSH_URL`).
+- OTel `service.name`: `image-share` (`OTEL_SERVICE_NAME` default in `apps/api/src/env.ts`). An
+  empty `OTEL_EXPORTER_OTLP_ENDPOINT` makes the exporters no-op (the live HomeLab compose leaves it
+  empty).
+
+## Gotchas
 
 - Argo API conventions apply wholesale (see `.claude/rules/`): zod coercion for params,
   `detail` blocks on every route, `{ data, total }` pagination, throw-and-bubble errors.
@@ -55,4 +78,3 @@ Bun workspaces monorepo, argo-patterned (`~/SourceRoot/argo` is the canonical re
 - Every filesystem access goes through `lib/paths.ts rootBaseDir`/`safeJoin` — no exceptions.
 - Public share surface: single opaque 404 for every denial (no oracle between wrong/rolled/expired
   token, missing slug, an id outside the share, or a size/route the token's role doesn't permit).
-- Deployment lives in `~/SourceRoot/homelab` (compose, Caddyfile, monitors); Dockerfile here.
