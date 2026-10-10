@@ -14,7 +14,7 @@ Bun workspaces monorepo, argo-patterned (`~/SourceRoot/argo` is the canonical re
   (view/download/full) — no passwords.
 - `apps/admin` — Vite 8 + React 19 + basalt-ui SPA (Eden Treaty typed on the api `App` export).
   basalt's enforcement toolchain lives in `apps/admin` (`.basalt/manifest.json`, a nested
-  `.oxlintrc.json` extending the shipped preset, managed `CLAUDE.md`/`DESIGN.md`/`.claude/`).
+  `.oxlintrc.json` extending the shipped preset, managed `AGENTS.md` block/`DESIGN.md`/`.claude/`).
   After a basalt bump run the LOCAL bin, never `bunx` — `bunx` serves a cached tarball and will
   happily report a passing scan from the previous version — and run it **from `apps/admin`**:
   `cd apps/admin && B=$PWD/node_modules/.bin/basalt-ui && $B doctor && $B sync && $B check-theme && $B check-theme --audit-allows`

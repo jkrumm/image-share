@@ -958,7 +958,7 @@ Library and Public carry a click-time `search` thunk (`Schema.parse({})`) becaus
 validate a required search shape.
 The basalt enforcement toolchain is installed under `apps/admin` — `.basalt/manifest.json`,
 `.oxlintrc.json` extending the shipped preset (oxlint resolves it as a nested config, so root
-`oxlint .` picks it up), plus the managed `CLAUDE.md`/`DESIGN.md`/`.claude/` seeds. Run
+`oxlint .` picks it up), plus the managed `AGENTS.md` block/`DESIGN.md`/`.claude/` seeds. Run
 `check-theme` + `doctor` + `sync --check` + `check-theme --audit-allows` + `check-coverage` after
 any basalt bump, through `apps/admin/node_modules/.bin/basalt-ui` — **never `bunx`**, which
 resolves from cache and can report a clean scan from the version you just replaced. Those
